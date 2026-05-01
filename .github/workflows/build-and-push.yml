@@ -28,16 +28,16 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/vacabuildary:git-${{ github.sha }}
-          
+          tags: ghcr.io/${{ github.repository_owner }}/vocabuildary:git-${{ github.sha }}
+
       - run: |
           sed -i \
-            "s|ghcr.io/.*/vacabuildary:[^ ]*|ghcr.io/${{ github.repository_owner }}/vacabuildary:git-${{ github.sha }}|" \
+            "s|ghcr.io/.*/vocabuildary:[^ ]*|ghcr.io/${{ github.repository_owner }}/vocabuildary:git-${{ github.sha }}|" \
             k8s/base/deployment.yaml
 
       - run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add k8s/base/deployment.yaml
-          git commit -m "chore(deploy): vacabuildary git-${{ github.sha }}"
+          git commit -m "chore(deploy): vocabuildary git-${{ github.sha }}"
           git push

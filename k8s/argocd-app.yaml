@@ -1,17 +1,17 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: vacabuildary
+  name: vocabuildary
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: https://github.com/krishnarajt/vacabuildary
+    repoURL: https://github.com/krishnarajt/vocabuildary
     targetRevision: main
     path: k8s/overlays/prod
   destination:
     server: https://kubernetes.default.svc
-    namespace: vacabuildary
+    namespace: vocabuildary
   syncPolicy:
     automated:
       prune: true
