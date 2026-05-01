@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: https://github.com/krishnarajt/vocabuildary
     targetRevision: main
-    path: k8s/overlays/prod
+    path: k8s
   destination:
     server: https://kubernetes.default.svc
     namespace: vocabuildary
