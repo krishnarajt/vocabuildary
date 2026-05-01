@@ -69,14 +69,26 @@ spec:
           # process-health check for both readiness and liveness.
           readinessProbe:
             exec:
-              command: ["pgrep", "-f", "main.py"]
+              command:
+                - python
+                - -c
+                - |
+                  import pathlib, sys
+                  cmdline = pathlib.Path("/proc/1/cmdline").read_text()
+                  sys.exit(0 if "main.py" in cmdline else 1)
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 12
           livenessProbe:
             exec:
-              command: ["pgrep", "-f", "main.py"]
+              command:
+                - python
+                - -c
+                - |
+                  import pathlib, sys
+                  cmdline = pathlib.Path("/proc/1/cmdline").read_text()
+                  sys.exit(0 if "main.py" in cmdline else 1)
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 5
