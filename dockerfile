@@ -54,4 +54,5 @@ USER app
 # Long-running service: APScheduler lives inside main.py. Override with
 # `python -m jobs.import_words` or `python -m jobs.send_daily_word` for
 # manual one-shots via `kubectl exec`.
+EXPOSE 8000
 CMD ["python", "main.py"]

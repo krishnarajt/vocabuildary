@@ -3,10 +3,8 @@ LLM Gateway adapter.
 
 This is a client for the LLM Gateway service hosted at
 `llmgateway.krishnarajthadesar.in` (or the in-cluster svc DNS, configured
-via LLM_GATEWAY_URL). It is intentionally NOT used anywhere in v1.5 —
-the business logic still comes straight out of the words table — but
-it's wired up so v2 can start making real generation calls without
-further plumbing.
+via LLM_GATEWAY_URL). Reminder generation uses it to enrich each word
+with an example paragraph, historical context, and etymology.
 
 Assumes an OpenAI-compatible chat-completions payload. If the gateway
 grows a bespoke route, only `LLM_GATEWAY_CHAT_PATH` / `chat()` need to

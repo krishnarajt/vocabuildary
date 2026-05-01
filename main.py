@@ -23,6 +23,7 @@ from app.common import constants
 from app.common.logging_config import setup_logging
 from app.db.database import init_db
 from app.services.word_service import send_daily_word
+from app.ui.server import UIServer
 from jobs.import_words import import_words_from_csv
 
 
@@ -90,6 +91,8 @@ async def _amain() -> int:
         misfire_grace_time=600,
     )
     scheduler.start()
+    ui_server = UIServer(port=8000)
+    ui_server.start()
 
     job = scheduler.get_job("send_daily_word")
     next_run = job.next_run_time if job else None
@@ -97,6 +100,7 @@ async def _amain() -> int:
         f"✓ Scheduler started — cron={constants.SEND_WORD_CRON!r} "
         f"tz={constants.TZ} next_run={next_run}"
     )
+    logger.info("✓ UI server started — port=8000")
     logger.info("=" * 60)
     logger.info("Vocabuildary is ready.")
     logger.info("=" * 60)
@@ -115,8 +119,9 @@ async def _amain() -> int:
         await stop_event.wait()
     finally:
         logger.info("=" * 60)
-        logger.info("Shutdown signal received — stopping scheduler...")
+        logger.info("Shutdown signal received — stopping scheduler and UI server...")
         scheduler.shutdown(wait=False)
+        ui_server.stop()
         logger.info("Vocabuildary stopped.")
         logger.info("=" * 60)
 

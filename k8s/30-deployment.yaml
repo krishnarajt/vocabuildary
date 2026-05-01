@@ -58,6 +58,10 @@ spec:
               value: "Asia/Kolkata"
             - name: WORDS_CSV_PATH
               value: "/app/words.csv"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
           resources:
             requests:
               cpu: "20m"
@@ -65,30 +69,18 @@ spec:
             limits:
               cpu: "250m"
               memory: "256Mi"
-          # No HTTP server to probe; `pgrep` on main.py is a cheap
-          # process-health check for both readiness and liveness.
           readinessProbe:
-            exec:
-              command:
-                - python
-                - -c
-                - |
-                  import pathlib, sys
-                  cmdline = pathlib.Path("/proc/1/cmdline").read_text()
-                  sys.exit(0 if "main.py" in cmdline else 1)
+            httpGet:
+              path: /
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 12
           livenessProbe:
-            exec:
-              command:
-                - python
-                - -c
-                - |
-                  import pathlib, sys
-                  cmdline = pathlib.Path("/proc/1/cmdline").read_text()
-                  sys.exit(0 if "main.py" in cmdline else 1)
+            httpGet:
+              path: /
+              port: http
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 5
