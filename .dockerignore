@@ -17,4 +17,3 @@ logs/
 *.db
 k8s/
 docker-compose*.yml
-README.md
