@@ -82,6 +82,7 @@ async def _amain() -> int:
 
     scheduler.add_job(
         _run_send_daily_word,
+        id="send_daily_word",
         trigger=trigger,
         name="send_daily_word",
         coalesce=True,         # if we missed fires (pod asleep), collapse to one
@@ -90,7 +91,8 @@ async def _amain() -> int:
     )
     scheduler.start()
 
-    next_run = scheduler.get_job("send_daily_word").next_run_time
+    job = scheduler.get_job("send_daily_word")
+    next_run = job.next_run_time if job else None
     logger.info(
         f"✓ Scheduler started — cron={constants.SEND_WORD_CRON!r} "
         f"tz={constants.TZ} next_run={next_run}"
