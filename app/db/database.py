@@ -4,7 +4,7 @@ Same shape as LLMGateway's app/db/database.py.
 """
 
 import logging
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from app.common import constants
@@ -32,6 +32,14 @@ SessionLocal = sessionmaker(
 # Pin all tables to the configured schema so a single Postgres can host
 # multiple apps cleanly (LLMGateway + Vocabuildary + future stuff).
 Base = declarative_base(metadata=None)
+
+
+def _safe_database_url() -> str:
+    """Redact the password before logging the configured database URL."""
+    try:
+        return engine.url.render_as_string(hide_password=True)
+    except Exception:
+        return "<unavailable>"
 
 
 @event.listens_for(Base.metadata, "before_create")
@@ -62,6 +70,16 @@ def init_db() -> None:
     # Import models so they register with Base.metadata before create_all.
     from app.db import models  # noqa: F401
 
-    logger.info(f"Initializing database schema '{constants.DB_SCHEMA}'...")
+    logger.info(
+        "Initializing database tables at %s (schema=%r)...",
+        _safe_database_url(),
+        constants.DB_SCHEMA,
+    )
     Base.metadata.create_all(bind=engine)
-    logger.info("Database initialized.")
+    inspector = inspect(engine)
+    words_exists = inspector.has_table("words", schema=constants.DB_SCHEMA or None)
+    logger.info(
+        "Database initialized. words table present=%s in schema=%r",
+        words_exists,
+        constants.DB_SCHEMA,
+    )

@@ -34,7 +34,7 @@ spec:
         - name: vocabuildary
           # Replace with your registry path once you publish the image.
           image: krishnarajt/vocabuildary:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: ["python", "main.py"]
           envFrom:
             # All secrets + connection strings come from the Vault-backed

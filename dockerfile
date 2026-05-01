@@ -16,6 +16,7 @@ WORKDIR /app
 # Copy only the dependency manifest first so this layer caches when only
 # source code changes.
 COPY pyproject.toml ./
+COPY README.md ./README.md
 # Lockfile is optional (may not exist on first build). `|| true` keeps it from
 # breaking an initial build without uv.lock present.
 COPY uv.lock* ./
