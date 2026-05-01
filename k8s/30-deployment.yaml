@@ -1,0 +1,72 @@
+# Long-running Vocabuildary service. APScheduler inside the pod handles
+# the daily-word cadence; there is no k8s CronJob.
+#
+# replicas: 1 is deliberate — two pods would each fire the daily word and
+# you'd get duplicate Telegram messages. `strategy: Recreate` makes
+# rollouts terminate the old pod before starting the new one, so the
+# scheduler never runs twice in parallel during a deploy either.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vocabuildary
+  namespace: vocabuildary
+  labels:
+    app: vocabuildary
+    component: service
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vocabuildary
+  template:
+    metadata:
+      labels:
+        app: vocabuildary
+        component: service
+    spec:
+      # Bump if the pod ever needs longer than 30s to stop cleanly. The
+      # service catches SIGTERM and shuts APScheduler down gracefully.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vocabuildary
+          # Replace with your registry path once you publish the image.
+          image: krishnarajt/vocabuildary:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "main.py"]
+          envFrom:
+            # All secrets + connection strings come from the Vault-backed
+            # Secret. Keys in the Secret map 1:1 to env var names read
+            # by app/common/constants.py.
+            - secretRef:
+                name: vocabuildary-secrets
+          env:
+            # Non-secret, rarely-changed app knobs. Override here rather
+            # than putting them in Vault.
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: LOG_DIR
+              value: "/app/logs"
+            - name: TZ
+              value: "Asia/Kolkata"
+            - name: WORDS_CSV_PATH
+              value: "/app/words.csv"
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          # No HTTP server to probe; `pgrep` on main.py is a cheap
+          # liveness check. Readiness is skipped because the pod has no
+          # traffic to receive.
+          livenessProbe:
+            exec:
+              command: ["pgrep", "-f", "main.py"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

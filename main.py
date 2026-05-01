@@ -1,90 +1,129 @@
+"""
+Vocabuildary — long-running service entrypoint.
+
+Layout mirrors LLMGateway's main.py: set up logging on import, do startup
+work (DB init + one-time import from words.csv), register the APScheduler
+job, then wait on a shutdown event so the pod stays alive under k8s.
+
+Scheduling lives here — not in a k8s CronJob — per preference. The cron
+expression and timezone are env-configurable (SEND_WORD_CRON + TZ), so
+fixing the v1 "9 AM in comment / 3:19 in code" drift is just a value
+change in Vault, no code edits required.
+"""
+
+import asyncio
 import logging
-import os
-from telegram import Bot
-from dotenv import load_dotenv
+import signal
+import sys
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-import sqlite3
-import asyncio
-import random
-from logging.handlers import TimedRotatingFileHandler
 
-# Load .env variables
-load_dotenv()
-
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-DB_FILE = 'vocab.db'
-
-# in case you dont run with docker. 
+from app.common import constants
+from app.common.logging_config import setup_logging
+from app.db.database import init_db
+from app.services.word_service import send_daily_word
+from jobs.import_words import import_words_from_csv
 
 
-# create log file if it doesnt exist
-# if not os.path.exists("logs"):
-#     os.makedirs("logs")
-# log_file_path = "logs/bot.log"
-# handler = TimedRotatingFileHandler(log_file_path, when="D", interval=1, backupCount=14)
-# handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+# Configure logging at import time so any downstream logger picks it up
+logger = setup_logging(job_name="vocabuildary")
 
-# logging.basicConfig(
-#     level=logging.INFO,
-#     handlers=[handler]
-# )
-# logger = logging.getLogger(__name__)
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+def _run_send_daily_word() -> None:
+    """Sync wrapper the scheduler calls — never lets an exception escape."""
+    try:
+        success, word = send_daily_word()
+        if success and word:
+            logger.info(f"Scheduled run OK — sent {word.word!r}")
+        else:
+            logger.warning("Scheduled run: no word was sent (empty table?).")
+    except Exception as e:
+        logger.error(f"Scheduled run failed: {e}", exc_info=True)
 
-# Get a random unsent word
-def get_random_unsent_word():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, word, meaning, example FROM words WHERE sent = 0')
-    rows = c.fetchall()
-    if not rows:
-        logger.info("All words sent. Resetting.")
-        c.execute('UPDATE words SET sent = 0')
-        conn.commit()
-        c.execute('SELECT id, word, meaning, example FROM words WHERE sent = 0')
-        rows = c.fetchall()
 
-    word_entry = random.choice(rows)
-    conn.close()
-    return word_entry
+async def _amain() -> int:
+    logger.info("=" * 60)
+    logger.info("Starting Vocabuildary service")
+    logger.info("=" * 60)
 
-# Mark a word as sent
-def mark_word_sent(word_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('UPDATE words SET sent = 1 WHERE id = ?', (word_id,))
-    conn.commit()
-    conn.close()
+    # ---- Startup: ensure schema + tables exist ----
+    try:
+        init_db()
+        logger.info("✓ Database initialized")
+    except Exception as e:
+        logger.critical(f"✗ Database init failed: {e}", exc_info=True)
+        return 2
 
-# Function to send a random word
-async def send_random_word():
-    word_entry = get_random_unsent_word()
-    word_id, word, meaning, example = word_entry
+    # ---- Startup: idempotent import from words.csv ----
+    # Baked into the image; re-running is cheap thanks to ON CONFLICT DO NOTHING.
+    try:
+        added, skipped = import_words_from_csv(constants.WORDS_CSV_PATH)
+        logger.info(
+            f"✓ Startup import: {added} new words added, {skipped} duplicates skipped"
+        )
+    except FileNotFoundError:
+        logger.warning(
+            f"words.csv not found at {constants.WORDS_CSV_PATH}; skipping startup import."
+        )
+    except Exception as e:
+        # Not fatal — the scheduler can still fire on whatever rows exist
+        logger.error(f"Startup import failed (continuing anyway): {e}", exc_info=True)
 
-    message = f"📖 *Word of the Day*\n\n*{word}*\n\n_{meaning}_\n\nExample: _{example}_"
-    await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
-    logger.info(f"Sent word: {word}")
+    # ---- Scheduler ----
+    scheduler = AsyncIOScheduler(timezone=constants.TZ)
+    try:
+        trigger = CronTrigger.from_crontab(constants.SEND_WORD_CRON, timezone=constants.TZ)
+    except Exception as e:
+        logger.critical(
+            f"Invalid SEND_WORD_CRON expression {constants.SEND_WORD_CRON!r}: {e}"
+        )
+        return 2
 
-    mark_word_sent(word_id)
-
-# Main async function
-async def main():
-    global bot
-    bot = Bot(token=TOKEN)
-    scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-
-    # Schedule daily at 9:00 AM
-    scheduler.add_job(send_random_word, trigger=CronTrigger(hour=3, minute=19))
+    scheduler.add_job(
+        _run_send_daily_word,
+        trigger=trigger,
+        name="send_daily_word",
+        coalesce=True,         # if we missed fires (pod asleep), collapse to one
+        max_instances=1,       # never run two daily-word jobs in parallel
+        misfire_grace_time=600,
+    )
     scheduler.start()
 
-    logger.info("Bot started. Will send a word every day at 9:00 AM.")
+    next_run = scheduler.get_job("send_daily_word").next_run_time
+    logger.info(
+        f"✓ Scheduler started — cron={constants.SEND_WORD_CRON!r} "
+        f"tz={constants.TZ} next_run={next_run}"
+    )
+    logger.info("=" * 60)
+    logger.info("Vocabuildary is ready.")
+    logger.info("=" * 60)
 
-    await asyncio.Event().wait()
+    # ---- Wait for shutdown ----
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            # Windows / some restricted envs — fall back to default KeyboardInterrupt behaviour
+            pass
 
-if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        await stop_event.wait()
+    finally:
+        logger.info("=" * 60)
+        logger.info("Shutdown signal received — stopping scheduler...")
+        scheduler.shutdown(wait=False)
+        logger.info("Vocabuildary stopped.")
+        logger.info("=" * 60)
+
+    return 0
+
+
+def main() -> int:
+    return asyncio.run(_amain())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

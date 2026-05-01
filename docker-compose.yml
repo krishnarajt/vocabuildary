@@ -1,0 +1,62 @@
+services:
+  vocabuildary:
+    build: .
+    container_name: vocabuildary
+    environment:
+      # App
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=/app/logs
+      - TZ=${TZ:-Asia/Kolkata}
+      - SEND_WORD_CRON=${SEND_WORD_CRON:-0 9 * * *}
+      # DB — points at the local `postgres` service below for dev convenience.
+      # In prod, DATABASE_URL lives in Vault and points at your real Postgres.
+      - DATABASE_URL=postgresql+psycopg://vocabuildary:vocabuildary@postgres:5432/vocabuildary
+      - DB_SCHEMA=${DB_SCHEMA:-vocabuildary}
+      # Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID must be set in .env}
+      # LLM Gateway (not used yet but plumbed through)
+      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-https://llmgateway.krishnarajthadesar.in}
+      - LLM_GATEWAY_API_KEY=${LLM_GATEWAY_API_KEY:-}
+      - LLM_GATEWAY_DEFAULT_MODEL=${LLM_GATEWAY_DEFAULT_MODEL:-gemini-flash-latest}
+      - LLM_GATEWAY_CHAT_PATH=${LLM_GATEWAY_CHAT_PATH:-/api/chat/completions}
+      # Import
+      - WORDS_CSV_PATH=/app/words.csv
+    volumes:
+      - app_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vocabuildary-network
+
+  # Optional local Postgres — skip with `docker compose up vocabuildary`
+  # if you want to point DATABASE_URL at an external Postgres instead.
+  postgres:
+    image: postgres:15-alpine
+    container_name: vocabuildary-postgres
+    environment:
+      - POSTGRES_USER=vocabuildary
+      - POSTGRES_PASSWORD=vocabuildary
+      - POSTGRES_DB=vocabuildary
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  # 5433 host-side so it doesn't clash with LLMGateway's 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vocabuildary -d vocabuildary"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - vocabuildary-network
+
+volumes:
+  postgres_data:
+  app_logs:
+
+networks:
+  vocabuildary-network:
+    driver: bridge
