@@ -16,8 +16,13 @@ metadata:
     component: service
 spec:
   replicas: 1
+  minReadySeconds: 60
+  progressDeadlineSeconds: 180
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: vocabuildary
@@ -61,8 +66,14 @@ spec:
               cpu: "250m"
               memory: "256Mi"
           # No HTTP server to probe; `pgrep` on main.py is a cheap
-          # liveness check. Readiness is skipped because the pod has no
-          # traffic to receive.
+          # process-health check for both readiness and liveness.
+          readinessProbe:
+            exec:
+              command: ["pgrep", "-f", "main.py"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
           livenessProbe:
             exec:
               command: ["pgrep", "-f", "main.py"]
