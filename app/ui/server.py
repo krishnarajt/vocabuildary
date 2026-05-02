@@ -18,24 +18,69 @@ from app.services.book_service import (
     BookProcessingError,
     create_book_upload,
     get_processed_word_map_url,
+    list_book_words_for_user,
     list_books_for_user,
     mark_book_upload_complete,
     process_book,
     serialize_book,
+    update_book_learning_settings,
 )
 from app.services.book_storage_service import BookStorageError, BookValidationError
+from app.services.catalog_service import (
+    CatalogValidationError,
+    create_language,
+    list_languages,
+    search_words,
+)
 from app.services.header_identity import (
     AuthenticationRequiredError,
     extract_gateway_identity,
 )
+from app.services.language_skill_service import (
+    LanguageQuizGenerationError,
+    LanguageQuizNotFoundError,
+    LanguageSkillValidationError,
+    generate_language_quiz,
+    get_language_quiz,
+    list_language_skills,
+    score_language_quiz,
+    serialize_language_quiz,
+    set_user_language_level,
+)
+from app.services.mobile_notification_service import (
+    MobileDeviceValidationError,
+    get_pending_mobile_notifications,
+    list_mobile_devices_for_user,
+    mark_mobile_notification_delivered,
+    mark_mobile_notification_opened,
+    register_mobile_device,
+    serialize_mobile_device,
+    serialize_mobile_notification,
+)
+from app.services.dictionary_import_service import (
+    ImportValidationError,
+    get_dictionary_stats,
+    list_import_runs,
+    serialize_import_run,
+    start_frequency_import,
+    start_kaikki_import,
+)
+from app.services.reminder_schedule_service import (
+    ReminderScheduleValidationError,
+    list_reminder_slots_for_user,
+    process_due_reminder_slots_for_user,
+    serialize_reminder_slot,
+    update_reminder_slots_for_user,
+)
 from app.services.user_service import (
     get_or_create_user,
     serialize_user,
-    update_telegram_settings,
+    update_user_settings,
 )
 from app.services.word_service import (
     LearningPlanLockedError,
     LearningPlanValidationError,
+    get_learnt_words_for_user,
     get_recent_reminders,
     get_daily_learning_plan_preview,
     get_word_progress_for_user,
@@ -221,7 +266,7 @@ HTML_PAGE = """<!DOCTYPE html>
       letter-spacing: 0.12em;
       text-transform: uppercase;
     }
-    input {
+    input, select, textarea {
       width: 100%;
       min-height: 46px;
       border: 1px solid var(--border);
@@ -231,7 +276,12 @@ HTML_PAGE = """<!DOCTYPE html>
       font: inherit;
       padding: 0 12px;
     }
-    input:focus {
+    textarea {
+      min-height: 92px;
+      padding: 12px;
+      resize: vertical;
+    }
+    input:focus, select:focus, textarea:focus {
       border-color: rgba(15, 118, 110, 0.5);
       outline: 3px solid rgba(15, 118, 110, 0.12);
     }
@@ -328,7 +378,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <main class="shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Telegram vocabulary relay</p>
+        <p class="eyebrow">Vocabulary relay</p>
         <h1>Vocabuildary</h1>
       </div>
       <span class="pill" id="user-pill">Checking session</span>
@@ -338,7 +388,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div>
         <p class="eyebrow">Control Room</p>
         <h2>Keep the daily word ritual moving.</h2>
-        <p>Configure your Telegram destination once, then send a test reminder or inspect your latest reminder history.</p>
+        <p>Configure your notification destination once, then send a test reminder or inspect your latest reminder history.</p>
       </div>
       <div class="actions">
         <button id="test-trigger">Send Test</button>
@@ -349,8 +399,15 @@ HTML_PAGE = """<!DOCTYPE html>
     <section class="grid">
       <section class="card">
         <p class="eyebrow">Your Settings</p>
-        <h2>Telegram</h2>
+        <h2>Delivery</h2>
         <form id="settings-form">
+          <div class="field">
+            <label for="provider">Delivery provider</label>
+            <select id="provider" name="notification_provider">
+              <option value="telegram">Telegram</option>
+              <option value="apprise">Apprise</option>
+            </select>
+          </div>
           <div class="field">
             <label for="bot-token">Bot token</label>
             <input id="bot-token" name="telegram_bot_token" autocomplete="off" placeholder="Paste a new token to replace the saved one">
@@ -358,6 +415,10 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="field">
             <label for="chat-id">Chat id</label>
             <input id="chat-id" name="telegram_chat_id" autocomplete="off" placeholder="123456789">
+          </div>
+          <div class="field">
+            <label for="apprise-urls">Apprise URLs</label>
+            <textarea id="apprise-urls" name="apprise_urls" autocomplete="off" placeholder="One Apprise URL per line"></textarea>
           </div>
           <div class="field">
             <label for="review-words">Review words per day</label>
@@ -410,8 +471,10 @@ HTML_PAGE = """<!DOCTYPE html>
     const testButton = document.getElementById("test-trigger");
     const refreshButton = document.getElementById("refresh-trigger");
     const form = document.getElementById("settings-form");
+    const provider = document.getElementById("provider");
     const botToken = document.getElementById("bot-token");
     const chatId = document.getElementById("chat-id");
+    const appriseUrls = document.getElementById("apprise-urls");
     const reviewWords = document.getElementById("review-words");
     const clozeWords = document.getElementById("cloze-words");
     const masteryEncounters = document.getElementById("mastery-encounters");
@@ -421,8 +484,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function apiPrefix() {
       const parts = window.location.pathname.split("/").filter(Boolean);
-      if (parts[0] === "api" && parts[1]) return `/api/${parts[1]}/api`;
-      return "/api";
+      if (parts[0] === "api" && parts[1]) return `/api/${parts[1]}`;
+      return "";
     }
 
     async function apiFetch(path, options = {}) {
@@ -481,8 +544,11 @@ HTML_PAGE = """<!DOCTYPE html>
     function renderUser(payload) {
       const user = payload.user;
       const name = user.name || user.email || user.gateway_sub || "Signed in";
+      const configured = user.notifications?.configured ?? user.telegram.configured;
       userPill.textContent = name;
+      provider.value = user.notifications?.provider || "telegram";
       chatId.value = user.telegram.chat_id || "";
+      appriseUrls.value = "";
       reviewWords.value = user.learning.daily_review_words ?? 3;
       clozeWords.value = user.learning.daily_cloze_words ?? 1;
       masteryEncounters.value = user.learning.mastery_encounters ?? 8;
@@ -491,10 +557,13 @@ HTML_PAGE = """<!DOCTYPE html>
       botToken.placeholder = user.telegram.bot_token_set
         ? `Saved token (${user.telegram.bot_token_hint})`
         : "Paste your Telegram bot token";
-      hint.textContent = user.telegram.configured
-        ? "Telegram is configured for your Authentik user."
-        : "Save a bot token and chat id before sending reminders.";
-      testButton.disabled = !user.telegram.configured;
+      appriseUrls.placeholder = user.apprise?.urls_set
+        ? `Saved Apprise URL (${user.apprise.urls_hint})`
+        : "One Apprise URL per line";
+      hint.textContent = configured
+        ? "Notification delivery is configured for your Authentik user."
+        : "Choose a provider and save its destination before sending reminders.";
+      testButton.disabled = !configured;
     }
 
     async function loadMe() {
@@ -526,6 +595,7 @@ HTML_PAGE = """<!DOCTYPE html>
       status.textContent = "Saving settings...";
       try {
         const payload = {
+          notification_provider: provider.value,
           telegram_chat_id: chatId.value.trim(),
           learning: {
             daily_review_words: reviewWords.value.trim(),
@@ -535,6 +605,7 @@ HTML_PAGE = """<!DOCTYPE html>
           },
         };
         if (botToken.value.trim()) payload.telegram_bot_token = botToken.value.trim();
+        if (appriseUrls.value.trim()) payload.apprise_urls = appriseUrls.value.trim();
         const data = await apiFetch("/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -619,13 +690,21 @@ HTML_PAGE = """<!DOCTYPE html>
 """
 
 
-def _serialize_reminder(item: Any) -> dict[str, str]:
+def _serialize_reminder(item: Any) -> dict[str, Any]:
     reminded_at = item.reminded_at
     if isinstance(reminded_at, datetime):
         reminded_at_text = reminded_at.isoformat()
     else:
         reminded_at_text = str(reminded_at)
-    return {"word": item.word_text, "reminded_at": reminded_at_text}
+    word = getattr(item, "word", None)
+    return {
+        "word_id": getattr(item, "word_id", None),
+        "word": item.word_text,
+        "meaning": word.meaning if word is not None else "",
+        "example": word.example if word is not None else "",
+        "language_code": word.language_code if word is not None else "",
+        "reminded_at": reminded_at_text,
+    }
 
 
 class _UIRequestHandler(BaseHTTPRequestHandler):
@@ -633,61 +712,130 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html"):
+        path = self._service_path(parsed.path)
+        if path in ("/", "/index.html"):
             self._send_html(HTML_PAGE)
             return
-        if parsed.path == "/health":
+        if path == "/health":
             self._send_json({"status": "ok"})
             return
-        if parsed.path == "/api/me":
+        if path == "/me":
             self._handle_me()
             return
-        if parsed.path == "/api/recent-reminders":
+        if path == "/recent-reminders":
             self._handle_recent_reminders(parsed.query)
             return
-        if parsed.path == "/api/word-progress":
+        if path == "/word-progress":
             self._handle_word_progress(parsed.query)
             return
-        if parsed.path == "/api/learning-plan":
+        if path == "/learnt-words":
+            self._handle_learnt_words(parsed.query)
+            return
+        if path == "/learning-plan":
             self._handle_learning_plan()
             return
-        if parsed.path == "/api/books":
+        if path == "/language-skills":
+            self._handle_language_skills()
+            return
+        if path.startswith("/language-skills/") and path.endswith("/quiz"):
+            self._handle_language_quiz(path)
+            return
+        if path == "/books":
             self._handle_books()
             return
-        if parsed.path.startswith("/api/books/") and parsed.path.endswith("/processed-words"):
-            self._handle_processed_words(parsed.path)
+        if path == "/languages":
+            self._handle_languages()
+            return
+        if path == "/words":
+            self._handle_words(parsed.query)
+            return
+        if path == "/reminder-slots":
+            self._handle_reminder_slots()
+            return
+        if path == "/imports":
+            self._handle_imports(parsed.query)
+            return
+        if path == "/mobile/devices":
+            self._handle_mobile_devices()
+            return
+        if path == "/mobile/notifications":
+            self._handle_mobile_notifications(parsed.query)
+            return
+        if path.startswith("/books/") and path.endswith("/words"):
+            self._handle_book_words(path, parsed.query)
+            return
+        if path.startswith("/books/") and path.endswith("/processed-words"):
+            self._handle_processed_words(path)
             return
         self._send_json({"error": "Not found."}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/test-trigger":
+        path = self._service_path(parsed.path)
+        if path == "/test-trigger":
             self._handle_test_trigger()
             return
-        if parsed.path.startswith("/api/word-progress/") and parsed.path.endswith("/reset"):
-            self._handle_reset_word_progress(parsed.path)
+        if path.startswith("/word-progress/") and path.endswith("/reset"):
+            self._handle_reset_word_progress(path)
             return
-        if parsed.path == "/api/learning-plan/rebuild":
+        if path == "/learning-plan/rebuild":
             self._handle_rebuild_learning_plan()
             return
-        if parsed.path == "/api/books/uploads":
+        if path.startswith("/language-skills/") and path.endswith("/quiz/generate"):
+            self._handle_generate_language_quiz(path)
+            return
+        if path.startswith("/language-skills/") and path.endswith("/quiz/score"):
+            self._handle_score_language_quiz(path)
+            return
+        if path == "/books/uploads":
             self._handle_create_book_upload()
             return
-        if parsed.path.startswith("/api/books/") and parsed.path.endswith("/upload-complete"):
-            self._handle_book_upload_complete(parsed.path)
+        if path == "/languages":
+            self._handle_create_language()
             return
-        if parsed.path.startswith("/api/books/") and parsed.path.endswith("/process"):
-            self._handle_process_book(parsed.path)
+        if path.startswith("/books/") and path.endswith("/upload-complete"):
+            self._handle_book_upload_complete(path)
+            return
+        if path.startswith("/books/") and path.endswith("/process"):
+            self._handle_process_book(path)
+            return
+        if path == "/imports/frequency":
+            self._handle_start_frequency_import()
+            return
+        if path == "/imports/kaikki":
+            self._handle_start_kaikki_import()
+            return
+        if path == "/mobile/devices":
+            self._handle_register_mobile_device()
+            return
+        if path == "/mobile/notifications/sync-due":
+            self._handle_sync_due_mobile_notifications()
+            return
+        if path.startswith("/mobile/notifications/") and path.endswith("/delivered"):
+            self._handle_mobile_notification_delivered(path)
+            return
+        if path.startswith("/mobile/notifications/") and path.endswith("/opened"):
+            self._handle_mobile_notification_opened(path)
             return
         self._send_json({"error": "Not found."}, status=HTTPStatus.NOT_FOUND)
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/settings":
+        path = self._service_path(parsed.path)
+        if path == "/settings":
             self._handle_update_settings()
             return
-        if parsed.path == "/api/learning-plan":
+        if path == "/learning-plan":
             self._handle_update_learning_plan()
+            return
+        if path == "/reminder-slots":
+            self._handle_update_reminder_slots()
+            return
+        if path.startswith("/language-skills/") and path.count("/") == 2:
+            self._handle_update_language_skill(path)
+            return
+        if path.startswith("/books/") and path.count("/") == 2:
+            self._handle_update_book(path)
             return
         self._send_json({"error": "Not found."}, status=HTTPStatus.NOT_FOUND)
 
@@ -714,26 +862,67 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _handle_recent_reminders(self, query: str) -> None:
+        params = parse_qs(query)
         try:
-            limit = int(parse_qs(query).get("limit", ["5"])[0])
-            limit = max(1, min(limit, 50))
+            limit = int(params.get("limit", ["5"])[0])
+            limit = max(1, min(limit, 500))
         except ValueError:
             limit = 5
+        try:
+            raw_days = params.get("days", [""])[0]
+            days = max(1, min(int(raw_days), 3650)) if raw_days else None
+        except ValueError:
+            days = None
 
         try:
             with self._db_session() as db:
                 user = self._current_user(db)
                 items = [
                     _serialize_reminder(item)
-                    for item in get_recent_reminders(limit=limit, db=db, user=user)
+                    for item in get_recent_reminders(limit=limit, days=days, db=db, user=user)
                 ]
-                self._send_json({"items": items})
+                self._send_json({"items": items, "days": days})
         except AuthenticationRequiredError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
         except Exception as exc:
             logger.error("Failed to fetch recent reminders: %s", exc, exc_info=True)
             self._send_json(
                 {"error": "Failed to fetch recent reminders."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_learnt_words(self, query: str) -> None:
+        params = parse_qs(query)
+        try:
+            limit = int(params.get("limit", ["200"])[0])
+            limit = max(1, min(limit, 500))
+        except ValueError:
+            limit = 200
+        try:
+            offset = int(params.get("offset", ["0"])[0])
+            offset = max(0, offset)
+        except ValueError:
+            offset = 0
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                items = [
+                    serialize_word_progress(item)
+                    for item in get_learnt_words_for_user(
+                        db,
+                        user,
+                        limit=limit,
+                        offset=offset,
+                    )
+                ]
+                self._send_json({"items": items, "limit": limit, "offset": offset})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch learnt words: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch learnt words."},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -782,6 +971,130 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    def _handle_language_skills(self) -> None:
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                self._send_json(list_language_skills(db, user))
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch language skills: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch language skills."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_update_language_skill(self, path: str) -> None:
+        try:
+            language_code = self._language_code_from_skill_path(path)
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                set_user_language_level(
+                    db,
+                    user,
+                    language_code,
+                    str(payload.get("level_code") or ""),
+                    source="manual",
+                )
+                skills = list_language_skills(db, user)
+                skill = self._skill_from_items(skills["items"], language_code)
+                self._send_json({"skill": skill, "levels": skills["levels"]})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LanguageSkillValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to update language skill: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to update language skill."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_language_quiz(self, path: str) -> None:
+        try:
+            language_code = self._language_code_from_skill_path(path, suffix="quiz")
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                self._current_user(db)
+                quiz = get_language_quiz(db, language_code)
+                self._send_json({"quiz": serialize_language_quiz(quiz)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LanguageQuizNotFoundError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            logger.error("Failed to fetch language quiz: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch language quiz."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_generate_language_quiz(self, path: str) -> None:
+        try:
+            language_code = self._language_code_from_skill_path(path, suffix="quiz/generate")
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                quiz, generated = generate_language_quiz(db, user, language_code)
+                self._send_json(
+                    {
+                        "quiz": serialize_language_quiz(quiz),
+                        "generated": generated,
+                        "message": "Quiz generated." if generated else "A quiz already exists.",
+                    },
+                    status=HTTPStatus.CREATED if generated else HTTPStatus.OK,
+                )
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LanguageQuizGenerationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
+        except Exception as exc:
+            logger.error("Failed to generate language quiz: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to generate language quiz."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_score_language_quiz(self, path: str) -> None:
+        try:
+            language_code = self._language_code_from_skill_path(path, suffix="quiz/score")
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                self._send_json(score_language_quiz(db, user, language_code, payload))
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LanguageQuizNotFoundError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except LanguageSkillValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to score language quiz: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to score language quiz."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
     def _handle_books(self) -> None:
         try:
             with self._db_session() as db:
@@ -794,6 +1107,412 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             logger.error("Failed to fetch books: %s", exc, exc_info=True)
             self._send_json(
                 {"error": "Failed to fetch books."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_languages(self) -> None:
+        try:
+            with self._db_session() as db:
+                self._current_user(db)
+                self._send_json({"items": list_languages(db)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch languages: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch languages."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_create_language(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                self._current_user(db)
+                language = create_language(db, payload)
+                self._send_json({"language": language}, status=HTTPStatus.CREATED)
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except CatalogValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to create language: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to create language."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_words(self, query: str) -> None:
+        params = parse_qs(query)
+        try:
+            limit = int(params.get("limit", ["50"])[0])
+            offset = int(params.get("offset", ["0"])[0])
+        except ValueError:
+            limit = 50
+            offset = 0
+        search_query = params.get("query", [""])[0]
+        language_code = params.get("language_code", [None])[0] or None
+
+        try:
+            with self._db_session() as db:
+                self._current_user(db)
+                self._send_json(
+                    search_words(
+                        db,
+                        query=search_query,
+                        language_code=language_code,
+                        limit=limit,
+                        offset=offset,
+                    )
+                )
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except CatalogValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to search words: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to search words."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_reminder_slots(self) -> None:
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                slots = [
+                    serialize_reminder_slot(slot)
+                    for slot in list_reminder_slots_for_user(db, user)
+                ]
+                self._send_json({"items": slots})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch reminder slots: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch reminder slots."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_update_reminder_slots(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                slots = [
+                    serialize_reminder_slot(slot)
+                    for slot in update_reminder_slots_for_user(db, user, payload)
+                ]
+                self._send_json({"items": slots})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except ReminderScheduleValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to update reminder slots: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to update reminder slots."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_update_book(self, path: str) -> None:
+        try:
+            book_id = self._book_id_from_path(path)
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                book = update_book_learning_settings(db, user, book_id, payload)
+                self._send_json({"book": serialize_book(book)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except BookNotFoundError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except (BookValidationError, CatalogValidationError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to update book: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to update book."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_book_words(self, path: str, query: str) -> None:
+        try:
+            book_id = self._book_id_from_path(path)
+            params = parse_qs(query)
+            limit = int(params.get("limit", ["200"])[0])
+            offset = int(params.get("offset", ["0"])[0])
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                self._send_json(list_book_words_for_user(db, user, book_id, limit=limit, offset=offset))
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except BookNotFoundError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            logger.error("Failed to fetch book words: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch book words."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_imports(self, query: str) -> None:
+        try:
+            params = parse_qs(query)
+            language_code = (params.get("language_code", ["en"])[0] or "en").strip().lower()
+            limit = int(params.get("limit", ["20"])[0])
+            limit = max(1, min(limit, 100))
+        except ValueError:
+            language_code = "en"
+            limit = 20
+
+        try:
+            with self._db_session() as db:
+                self._current_user(db)
+                runs = [serialize_import_run(run) for run in list_import_runs(db, limit=limit)]
+                stats = get_dictionary_stats(db, language_code=language_code)
+                self._send_json({"stats": stats, "items": runs})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch imports: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch imports."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_devices(self) -> None:
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                devices = [
+                    serialize_mobile_device(device)
+                    for device in list_mobile_devices_for_user(db, user)
+                ]
+                self._send_json({"items": devices})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch mobile devices: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch mobile devices."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_register_mobile_device(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                device = register_mobile_device(db, user, payload)
+                self._send_json({"device": serialize_mobile_device(device)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except MobileDeviceValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to register mobile device: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to register mobile device."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_notifications(self, query: str) -> None:
+        params = parse_qs(query)
+        try:
+            limit = int(params.get("limit", ["20"])[0])
+        except ValueError:
+            limit = 20
+        device_id = params.get("device_id", [""])[0].strip() or None
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                notifications = [
+                    serialize_mobile_notification(notification)
+                    for notification in get_pending_mobile_notifications(
+                        db,
+                        user,
+                        device_id=device_id,
+                        limit=limit,
+                    )
+                ]
+                self._send_json({"items": notifications})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to fetch mobile notifications: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to fetch mobile notifications."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_sync_due_mobile_notifications(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                if payload.get("device_id"):
+                    register_mobile_device(db, user, payload)
+                results = process_due_reminder_slots_for_user(db, user)
+                notifications = [
+                    serialize_mobile_notification(notification)
+                    for notification in get_pending_mobile_notifications(
+                        db,
+                        user,
+                        device_id=str(payload.get("device_id") or "").strip() or None,
+                        limit=int(payload.get("limit") or 20),
+                    )
+                ]
+                self._send_json({"results": results, "items": notifications})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except MobileDeviceValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to sync due mobile notifications: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to sync mobile notifications."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_notification_delivered(self, path: str) -> None:
+        try:
+            notification_id = self._mobile_notification_id_from_path(path)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                notification = mark_mobile_notification_delivered(db, user, notification_id)
+                self._send_json({"notification": serialize_mobile_notification(notification)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            logger.error("Failed to mark mobile notification delivered: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to mark mobile notification delivered."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_notification_opened(self, path: str) -> None:
+        try:
+            notification_id = self._mobile_notification_id_from_path(path)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                notification = mark_mobile_notification_opened(db, user, notification_id)
+                self._send_json({"notification": serialize_mobile_notification(notification)})
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            logger.error("Failed to mark mobile notification opened: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to mark mobile notification opened."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_start_frequency_import(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                run, started = start_frequency_import(db, user, payload)
+                self._send_json(
+                    {
+                        "run": serialize_import_run(run),
+                        "started": started,
+                        "message": "Frequency import started."
+                        if started
+                        else "An import is already running.",
+                    },
+                    status=HTTPStatus.CREATED if started else HTTPStatus.OK,
+                )
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except ImportValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to start frequency import: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to start frequency import."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_start_kaikki_import(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._current_user(db)
+                run, started = start_kaikki_import(db, user, payload)
+                self._send_json(
+                    {
+                        "run": serialize_import_run(run),
+                        "started": started,
+                        "message": "Kaikki import started."
+                        if started
+                        else "An import is already running.",
+                    },
+                    status=HTTPStatus.CREATED if started else HTTPStatus.OK,
+                )
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except ImportValidationError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            logger.error("Failed to start Kaikki import: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to start Kaikki import."},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -922,7 +1641,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         try:
             with self._db_session() as db:
                 user = self._current_user(db)
-                user = update_telegram_settings(db, user, payload)
+                user = update_user_settings(db, user, payload)
                 self._send_json({"user": serialize_user(user)})
         except AuthenticationRequiredError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
@@ -1014,9 +1733,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         try:
             with self._db_session() as db:
                 user = self._current_user(db)
-                if not user.telegram_configured:
+                if not user.notifications_configured:
                     self._send_json(
-                        {"error": "Configure your Telegram bot token and chat id first."},
+                        {"error": "Configure a notification provider first."},
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
@@ -1029,7 +1748,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 self._send_json(
-                    {"message": f"Test notification sent to Telegram for {word.word}."}
+                    {"message": f"Test notification sent for {word.word}."}
                 )
         except AuthenticationRequiredError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
@@ -1044,23 +1763,59 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         identity = extract_gateway_identity(dict(self.headers.items()))
         return get_or_create_user(db, identity)
 
+    @staticmethod
+    def _service_path(path: str) -> str:
+        if path == "/api":
+            return "/"
+        if path.startswith("/api/"):
+            return path[4:]
+        return path
+
     def _book_id_from_path(self, path: str) -> int:
-        parts = path.strip("/").split("/")
-        if len(parts) < 3 or parts[0] != "api" or parts[1] != "books":
+        parts = self._service_path(path).strip("/").split("/")
+        if len(parts) < 2 or parts[0] != "books":
             raise ValueError("Book id is required.")
         try:
-            return int(parts[2])
+            return int(parts[1])
         except ValueError as exc:
             raise ValueError("Book id must be a number.") from exc
 
+    def _language_code_from_skill_path(self, path: str, suffix: str | None = None) -> str:
+        parts = self._service_path(path).strip("/").split("/")
+        expected_suffix = suffix.split("/") if suffix else []
+        if len(parts) != 2 + len(expected_suffix) or parts[0] != "language-skills":
+            raise ValueError("Language code is required.")
+        if expected_suffix and parts[2:] != expected_suffix:
+            raise ValueError("Language skill path is not valid.")
+        language_code = parts[1].strip().lower()
+        if not language_code:
+            raise ValueError("Language code is required.")
+        return language_code
+
+    @staticmethod
+    def _skill_from_items(items: list[dict[str, Any]], language_code: str) -> dict[str, Any] | None:
+        for item in items:
+            if item.get("language", {}).get("code") == language_code:
+                return item
+        return None
+
     def _word_progress_id_from_path(self, path: str) -> int:
-        parts = path.strip("/").split("/")
-        if len(parts) != 4 or parts[0] != "api" or parts[1] != "word-progress":
+        parts = self._service_path(path).strip("/").split("/")
+        if len(parts) != 3 or parts[0] != "word-progress":
             raise ValueError("Word id is required.")
+        try:
+            return int(parts[1])
+        except ValueError as exc:
+            raise ValueError("Word id must be a number.") from exc
+
+    def _mobile_notification_id_from_path(self, path: str) -> int:
+        parts = self._service_path(path).strip("/").split("/")
+        if len(parts) != 4 or parts[0] != "mobile" or parts[1] != "notifications":
+            raise ValueError("Notification id is required.")
         try:
             return int(parts[2])
         except ValueError as exc:
-            raise ValueError("Word id must be a number.") from exc
+            raise ValueError("Notification id must be a number.") from exc
 
     def _read_json_body(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0") or "0")

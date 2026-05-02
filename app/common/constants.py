@@ -32,6 +32,7 @@ TZ: str = os.getenv("TZ", "Asia/Kolkata")
 # Cron expression (standard 5-field crontab) for when the daily word fires.
 # Evaluated inside APScheduler using the TZ above. Default: 09:00 local.
 SEND_WORD_CRON: str = os.getenv("SEND_WORD_CRON", "0 9 * * *")
+REMINDER_SLOT_POLL_SECONDS: int = int(os.getenv("REMINDER_SLOT_POLL_SECONDS", "60"))
 
 # ===== Database =====
 # A fully-formed URL lives in Vault and is injected via the External Secret.
@@ -45,6 +46,13 @@ DB_SCHEMA: str = os.getenv("DB_SCHEMA", "vocabuildary")
 # Authentik user in the database, populated through the UI.
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ===== Notifications =====
+# Per-user delivery is stored in the database. These env values are only used
+# by the legacy no-user fallback path.
+NOTIFICATION_PROVIDER: str = os.getenv("NOTIFICATION_PROVIDER", "telegram").strip().lower()
+APPRISE_URLS: str = os.getenv("APPRISE_URLS", "")
+APPRISE_NOTIFICATION_TITLE: str = os.getenv("APPRISE_NOTIFICATION_TITLE", "Vocabuildary")
 
 # ===== Book storage =====
 # S3-compatible object storage. The env var names intentionally match the
@@ -86,6 +94,22 @@ LLM_GATEWAY_CHAT_PATH: str = os.getenv(
 # Path to the CSV file consumed by the startup importer / jobs/import_words.py.
 # Baked into the image at build time by default.
 WORDS_CSV_PATH: str = os.getenv("WORDS_CSV_PATH", "/app/words.csv")
+
+# UI-triggered dictionary imports. Frequency data is intentionally separate
+# from definitions so the app can ingest a broad word catalog first and enrich
+# meanings later.
+FREQUENCY_IMPORT_WORDLIST: str = os.getenv("FREQUENCY_IMPORT_WORDLIST", "best")
+FREQUENCY_IMPORT_MAX_WORDS: int = int(os.getenv("FREQUENCY_IMPORT_MAX_WORDS", "2000000"))
+FREQUENCY_IMPORT_BATCH_SIZE: int = int(os.getenv("FREQUENCY_IMPORT_BATCH_SIZE", "1000"))
+
+KAIKKI_ENGLISH_JSONL_URL: str = os.getenv(
+    "KAIKKI_ENGLISH_JSONL_URL",
+    "https://kaikki.org/dictionary/English/kaikki.org-dictionary-English.jsonl",
+)
+KAIKKI_IMPORT_CHUNK_COUNT: int = int(os.getenv("KAIKKI_IMPORT_CHUNK_COUNT", "10"))
+KAIKKI_IMPORT_TOTAL_ESTIMATE: int = int(os.getenv("KAIKKI_IMPORT_TOTAL_ESTIMATE", "1709154"))
+KAIKKI_IMPORT_BATCH_SIZE: int = int(os.getenv("KAIKKI_IMPORT_BATCH_SIZE", "500"))
+KAIKKI_IMPORT_TIMEOUT_SECONDS: int = int(os.getenv("KAIKKI_IMPORT_TIMEOUT_SECONDS", "3600"))
 
 # ===== Learning schedule defaults =====
 # These are only defaults for newly-created per-user settings. Users can tune

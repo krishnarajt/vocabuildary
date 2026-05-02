@@ -15,6 +15,10 @@ x-user-email
 x-user-name
 ```
 
+Public gateway URLs use the service prefix directly, for example
+`/api/vocabuildary/me` and `/api/vocabuildary/books`. The service also accepts
+the older direct `/api/...` paths for compatibility with the built-in UI.
+
 On each authenticated API request, Vocabuildary upserts a
 `vocabuildary_users` row keyed by the stable gateway subject when available,
 stores safe identity headers for audit/debugging, and keeps each user's

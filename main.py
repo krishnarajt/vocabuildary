@@ -22,6 +22,8 @@ from apscheduler.triggers.cron import CronTrigger
 from app.common import constants
 from app.common.logging_config import setup_logging
 from app.db.database import init_db
+from app.services.dictionary_import_service import mark_stale_import_runs_failed
+from app.services.reminder_schedule_service import process_due_reminder_slots
 from app.services.word_service import send_daily_words_to_configured_users
 from app.ui.server import UIServer
 from jobs.import_words import import_words_from_csv
@@ -48,7 +50,18 @@ def _run_send_daily_word() -> None:
         else:
             logger.warning("Scheduled run: no word was sent.")
     except Exception as e:
-        logger.error(f"Scheduled run failed: {e}", exc_info=True)
+            logger.error(f"Scheduled run failed: {e}", exc_info=True)
+
+
+def _run_due_reminder_slots() -> None:
+    """Poll user-configured reminder slots and deliver any due messages."""
+    try:
+        results = process_due_reminder_slots()
+        sent = [result for result in results if result.get("sent")]
+        if sent:
+            logger.info("Reminder slot poll delivered %s message(s)", len(sent))
+    except Exception as e:
+        logger.error(f"Reminder slot poll failed: {e}", exc_info=True)
 
 
 async def _amain() -> int:
@@ -60,6 +73,9 @@ async def _amain() -> int:
     try:
         init_db(use_alembic=True)
         logger.info("✓ Database initialized")
+        stale_imports = mark_stale_import_runs_failed()
+        if stale_imports:
+            logger.warning("Marked %s interrupted import run(s) as failed", stale_imports)
     except Exception as e:
         logger.critical(f"✗ Database init failed: {e}", exc_info=True)
         return 2
@@ -96,6 +112,16 @@ async def _amain() -> int:
         name="send_daily_word",
         coalesce=True,         # if we missed fires (pod asleep), collapse to one
         max_instances=1,       # never run two daily-word jobs in parallel
+        misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        _run_due_reminder_slots,
+        id="due_reminder_slots",
+        trigger="interval",
+        seconds=max(15, constants.REMINDER_SLOT_POLL_SECONDS),
+        name="due_reminder_slots",
+        coalesce=True,
+        max_instances=1,
         misfire_grace_time=600,
     )
     scheduler.start()

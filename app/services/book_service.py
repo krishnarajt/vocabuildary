@@ -8,11 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.common import constants
-from app.db.models import Book, VocabuildaryUser
+from app.db.models import Book, BookWord, VocabuildaryUser, Word
+from app.services.catalog_service import ensure_language, normalize_language_code
 from app.services.book_storage_service import (
     BookStorageService,
     BookValidationError,
@@ -64,6 +66,31 @@ def _book_display_name(book: Book) -> str:
     return book.title or book.original_filename
 
 
+def _book_language_code(payload: dict[str, Any]) -> str:
+    raw_code = payload.get("language_code")
+    if raw_code:
+        return normalize_language_code(raw_code)
+
+    raw_language = str(payload.get("language") or "").strip().lower()
+    language_names = {
+        "english": "en",
+        "spanish": "es",
+        "french": "fr",
+        "german": "de",
+        "italian": "it",
+        "portuguese": "pt",
+        "hindi": "hi",
+        "japanese": "ja",
+        "korean": "ko",
+        "chinese": "zh",
+    }
+    if raw_language in language_names:
+        return language_names[raw_language]
+    if raw_language:
+        return normalize_language_code(raw_language)
+    return constants.DEFAULT_TARGET_LANGUAGE_CODE
+
+
 def create_book_upload(
     db: Session,
     user: VocabuildaryUser,
@@ -76,6 +103,7 @@ def create_book_upload(
     extension = validate_book_upload_request(filename, file_size_int)
     content_type = infer_content_type(filename, _clean_optional_text(payload.get("content_type")))
     book_uuid = str(uuid.uuid4())
+    language_code = _book_language_code(payload)
     storage = storage or get_book_storage_service()
     source_object_key = build_source_object_key(user.id, book_uuid, filename)
 
@@ -88,6 +116,7 @@ def create_book_upload(
         isbn=_clean_optional_text(payload.get("isbn")),
         author=_clean_optional_text(payload.get("author")),
         language=_clean_optional_text(payload.get("language")),
+        language_code=language_code,
         notes=_clean_optional_text(payload.get("notes")),
         original_filename=filename,
         file_extension=extension,
@@ -96,6 +125,7 @@ def create_book_upload(
         source_bucket=storage.bucket_name,
         source_object_key=source_object_key,
         status=BOOK_STATUS_UPLOAD_PENDING,
+        learning_enabled=bool(payload.get("learning_enabled", False)),
         updated_at=_utcnow(),
     )
     db.add(book)
@@ -171,6 +201,7 @@ def process_book(
             word_map = count_words(text)
             word_map_key = build_word_map_object_key(book.user_id, book.book_uuid)
             storage.upload_json(word_map_key, word_map)
+            _persist_book_words(db, book, word_map)
 
         book.word_map_bucket = storage.bucket_name
         book.word_map_object_key = word_map_key
@@ -189,6 +220,139 @@ def process_book(
         book.updated_at = _utcnow()
         db.commit()
         raise BookProcessingError(str(exc)) from exc
+
+
+def _persist_book_words(db: Session, book: Book, word_map: dict[str, int]) -> None:
+    """Persist a processed book's word map into canonical words + book_words."""
+    language_code = normalize_language_code(book.language_code or book.language)
+    ensure_language(db, language_code)
+    book.language_code = language_code
+
+    ranked_items = sorted(
+        ((word, int(count)) for word, count in word_map.items() if word and int(count) > 0),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if not ranked_items:
+        db.execute(delete(BookWord).where(BookWord.book_id == book.id))
+        return
+
+    now = _utcnow()
+    words = [word for word, _count in ranked_items]
+    if db.bind and db.bind.dialect.name == "postgresql":
+        rows = [
+            {
+                "language_code": language_code,
+                "word": word,
+                "meaning": "",
+                "example": "",
+                "sent": False,
+            }
+            for word in words
+        ]
+        db.execute(
+            pg_insert(Word)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["language_code", "word"])
+        )
+        db.flush()
+    else:
+        existing = set(
+            db.execute(
+                select(Word.word).where(Word.language_code == language_code, Word.word.in_(words))
+            ).scalars()
+        )
+        db.add_all(
+            [
+                Word(language_code=language_code, word=word, meaning="", example="", sent=False)
+                for word in words
+                if word not in existing
+            ]
+        )
+        db.flush()
+
+    word_ids = dict(
+        db.execute(
+            select(Word.word, Word.id).where(Word.language_code == language_code, Word.word.in_(words))
+        ).all()
+    )
+    db.execute(delete(BookWord).where(BookWord.book_id == book.id))
+    db.flush()
+
+    db.add_all(
+        [
+            BookWord(
+                book_id=book.id,
+                word_id=word_ids[word],
+                user_id=book.user_id,
+                language_code=language_code,
+                source_text=word,
+                occurrence_count=count,
+                rank_in_book=rank,
+                updated_at=now,
+            )
+            for rank, (word, count) in enumerate(ranked_items, start=1)
+            if word in word_ids
+        ]
+    )
+
+
+def update_book_learning_settings(
+    db: Session,
+    user: VocabuildaryUser,
+    book_id: int,
+    payload: dict[str, Any],
+) -> Book:
+    book = get_book_for_user(db, user, book_id)
+    if "learning_enabled" in payload:
+        book.learning_enabled = bool(payload.get("learning_enabled"))
+    if "language_code" in payload:
+        language_code = normalize_language_code(payload.get("language_code"))
+        ensure_language(db, language_code)
+        book.language_code = language_code
+    if "language" in payload:
+        book.language = _clean_optional_text(payload.get("language"))
+    book.updated_at = _utcnow()
+    db.commit()
+    db.refresh(book)
+    return book
+
+
+def list_book_words_for_user(
+    db: Session,
+    user: VocabuildaryUser,
+    book_id: int,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    book = get_book_for_user(db, user, book_id)
+    limit = max(1, min(int(limit or 200), 500))
+    offset = max(0, int(offset or 0))
+    total = int(
+        db.execute(
+            select(func.count())
+            .select_from(BookWord)
+            .where(BookWord.book_id == book.id)
+        ).scalar_one()
+        or 0
+    )
+    rows = (
+        db.execute(
+            select(BookWord, Word)
+            .join(Word, Word.id == BookWord.word_id)
+            .where(BookWord.book_id == book.id)
+            .order_by(BookWord.rank_in_book.asc().nullslast(), Word.word.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        .all()
+    )
+    return {
+        "book": serialize_book(book),
+        "items": [serialize_book_word(book_word, word) for book_word, word in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def get_processed_word_map_url(
@@ -223,8 +387,10 @@ def serialize_book(book: Book) -> dict[str, Any]:
         "isbn": book.isbn or "",
         "author": book.author or "",
         "language": book.language or "",
+        "language_code": getattr(book, "language_code", None) or constants.DEFAULT_TARGET_LANGUAGE_CODE,
         "notes": book.notes or "",
         "status": book.status,
+        "learning_enabled": bool(getattr(book, "learning_enabled", False)),
         "processing_error": book.processing_error,
         "source": {
             "filename": book.original_filename,
@@ -246,4 +412,24 @@ def serialize_book(book: Book) -> dict[str, Any]:
         "created_at": _serialize_datetime(book.created_at),
         "updated_at": _serialize_datetime(book.updated_at),
         "uploaded_at": _serialize_datetime(book.uploaded_at),
+    }
+
+
+def serialize_book_word(book_word: BookWord, word: Word) -> dict[str, Any]:
+    return {
+        "book_word_id": book_word.id,
+        "book_id": book_word.book_id,
+        "word_id": word.id,
+        "word": word.word,
+        "language_code": word.language_code,
+        "source_text": book_word.source_text,
+        "occurrence_count": book_word.occurrence_count,
+        "rank_in_book": book_word.rank_in_book,
+        "meaning": word.meaning or "",
+        "example": word.example or "",
+        "part_of_speech": word.part_of_speech or "",
+        "frequency_rank": word.frequency_rank,
+        "zipf_frequency": word.zipf_frequency,
+        "frequency_source": word.frequency_source or "",
+        "definition_source": word.definition_source or "",
     }

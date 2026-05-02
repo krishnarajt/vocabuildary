@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.common import constants
-from app.db.models import UserLearningSettings, VocabuildaryUser
+from app.db.models import MobileDevice, UserLearningSettings, UserReminderSlot, VocabuildaryUser
 from app.services.header_identity import GatewayIdentity
+from app.services.notification_service import normalize_notification_provider
 
 
 def _redact_token(token: str | None) -> str | None:
@@ -19,6 +20,17 @@ def _redact_token(token: str | None) -> str | None:
     if len(token) <= 8:
         return "saved"
     return f"{token[:4]}...{token[-4:]}"
+
+
+def _apprise_hint(urls: str | None) -> str | None:
+    if not urls or not urls.strip():
+        return None
+    cleaned_urls = [line.strip() for line in urls.replace("\r", "\n").split("\n") if line.strip()]
+    if not cleaned_urls:
+        return None
+    scheme = cleaned_urls[0].split("://", 1)[0] if "://" in cleaned_urls[0] else "url"
+    suffix = "" if len(cleaned_urls) == 1 else f" +{len(cleaned_urls) - 1}"
+    return f"{scheme}://...{suffix}"
 
 
 def get_or_create_user(db: Session, identity: GatewayIdentity) -> VocabuildaryUser:
@@ -63,22 +75,49 @@ def get_or_create_learning_settings(
 
 
 def get_configured_users(db: Session) -> list[VocabuildaryUser]:
-    """Return users that have enough Telegram settings for sends."""
+    """Return users that have enough selected-provider settings for sends."""
+    provider = func.coalesce(VocabuildaryUser.notification_provider, "telegram")
+    telegram_ready = and_(
+        provider != "apprise",
+        VocabuildaryUser.telegram_bot_token.is_not(None),
+        VocabuildaryUser.telegram_chat_id.is_not(None),
+    )
+    apprise_ready = and_(
+        provider == "apprise",
+        VocabuildaryUser.apprise_urls.is_not(None),
+        func.length(func.trim(VocabuildaryUser.apprise_urls)) > 0,
+    )
+    mobile_ready = (
+        select(MobileDevice.id)
+        .where(MobileDevice.user_id == VocabuildaryUser.id)
+        .where(MobileDevice.enabled.is_(True))
+        .exists()
+    )
     stmt = (
         select(VocabuildaryUser)
-        .where(VocabuildaryUser.telegram_bot_token.is_not(None))
-        .where(VocabuildaryUser.telegram_chat_id.is_not(None))
+        .where(or_(telegram_ready, apprise_ready, mobile_ready))
+        .where(
+            ~select(UserReminderSlot.id)
+            .where(UserReminderSlot.user_id == VocabuildaryUser.id)
+            .where(UserReminderSlot.enabled.is_(True))
+            .exists()
+        )
         .order_by(VocabuildaryUser.id.asc())
     )
     return list(db.execute(stmt).scalars())
 
 
-def update_telegram_settings(
+def update_user_settings(
     db: Session,
     user: VocabuildaryUser,
     payload: dict[str, Any],
 ) -> VocabuildaryUser:
-    """Update Telegram settings without accidentally exposing saved secrets."""
+    """Update delivery and learning settings without exposing saved secrets."""
+    if "notification_provider" in payload:
+        user.notification_provider = normalize_notification_provider(
+            payload.get("notification_provider")
+        )
+
     if "telegram_bot_token" in payload:
         token = str(payload.get("telegram_bot_token") or "").strip()
         if token:
@@ -91,6 +130,14 @@ def update_telegram_settings(
         chat_id = str(payload.get("telegram_chat_id") or "").strip()
         user.telegram_chat_id = chat_id or None
 
+    if "apprise_urls" in payload:
+        apprise_urls = str(payload.get("apprise_urls") or "").strip()
+        if apprise_urls:
+            user.apprise_urls = apprise_urls
+
+    if payload.get("clear_apprise_urls") is True:
+        user.apprise_urls = None
+
     learning_payload = payload.get("learning")
     if isinstance(learning_payload, dict):
         settings = get_or_create_learning_settings(db, user)
@@ -100,6 +147,15 @@ def update_telegram_settings(
     db.commit()
     db.refresh(user)
     return user
+
+
+def update_telegram_settings(
+    db: Session,
+    user: VocabuildaryUser,
+    payload: dict[str, Any],
+) -> VocabuildaryUser:
+    """Backward-compatible alias for older callers."""
+    return update_user_settings(db, user, payload)
 
 
 def _bounded_int(value: Any, *, minimum: int, maximum: int) -> int | None:
@@ -189,6 +245,13 @@ def serialize_learning_settings(settings: UserLearningSettings | None) -> dict[s
 
 def serialize_user(user: VocabuildaryUser) -> dict[str, Any]:
     """Public user payload for UI clients."""
+    provider = normalize_notification_provider(user.notification_provider)
+    telegram_configured = bool(user.telegram_bot_token and user.telegram_chat_id)
+    apprise_configured = bool((user.apprise_urls or "").strip())
+    provider_configured = apprise_configured if provider == "apprise" else telegram_configured
+    mobile_devices = list(user.mobile_devices or [])
+    enabled_mobile_devices = [device for device in mobile_devices if device.enabled]
+    notifications_configured = provider_configured or bool(enabled_mobile_devices)
     return {
         "id": user.id,
         "identity_key": user.identity_key,
@@ -196,11 +259,26 @@ def serialize_user(user: VocabuildaryUser) -> dict[str, Any]:
         "email": user.email,
         "name": user.name,
         "raw_identity_headers": user.raw_identity_headers or {},
+        "notifications": {
+            "provider": provider,
+            "configured": notifications_configured,
+            "provider_configured": provider_configured,
+        },
         "telegram": {
             "bot_token_set": bool(user.telegram_bot_token),
             "bot_token_hint": _redact_token(user.telegram_bot_token),
             "chat_id": user.telegram_chat_id or "",
-            "configured": bool(user.telegram_bot_token and user.telegram_chat_id),
+            "configured": telegram_configured,
+        },
+        "apprise": {
+            "urls_set": apprise_configured,
+            "urls_hint": _apprise_hint(user.apprise_urls),
+            "configured": apprise_configured,
+        },
+        "mobile": {
+            "configured": bool(enabled_mobile_devices),
+            "device_count": len(mobile_devices),
+            "enabled_device_count": len(enabled_mobile_devices),
         },
         "learning": serialize_learning_settings(user.learning_settings),
         "created_at": user.created_at.isoformat() if user.created_at else None,

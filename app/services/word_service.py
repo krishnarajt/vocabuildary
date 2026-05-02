@@ -18,10 +18,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from app.adapters.telegram import TelegramAdapter
 from app.common import constants
 from app.db.database import get_db_session
 from app.db.models import (
+    Book,
+    BookWord,
     DailyLearningSession,
     ReminderLog,
     UserLearningSettings,
@@ -35,6 +36,18 @@ from app.services.reminder_content_service import (
     build_reminder_message,
     render_reminder_message,
 )
+from app.services.language_skill_service import (
+    get_frequency_band_for_level,
+    get_user_language_level,
+)
+from app.services.notification_service import (
+    NotificationSender,
+    create_legacy_notifier,
+    create_notifier_for_user,
+    legacy_notification_configured,
+    notification_provider_label,
+)
+from app.services.mobile_notification_service import queue_mobile_notifications_for_user
 from app.services.user_service import (
     get_configured_users,
     get_or_create_learning_settings,
@@ -126,6 +139,11 @@ def _serialize_word_for_plan(word: Word | None) -> dict | None:
         "etymology": word.etymology,
         "register": word.register,
         "difficulty_level": word.difficulty_level,
+        "frequency_rank": word.frequency_rank,
+        "frequency_score": word.frequency_score,
+        "zipf_frequency": word.zipf_frequency,
+        "frequency_source": word.frequency_source,
+        "definition_source": word.definition_source,
     }
 
 
@@ -167,8 +185,8 @@ def get_random_unsent_word(db: Session) -> Optional[Word]:
     """
     Legacy fallback: return a random global word where sent=False.
 
-    This keeps the environment-based Telegram fallback usable when no signed-in
-    users have configured Telegram yet.
+    This keeps the environment-based fallback usable when no signed-in users
+    have configured notifications yet.
     """
     unsent = db.query(Word).filter(Word.sent.is_(False)).all()
 
@@ -205,6 +223,7 @@ def log_reminder(
 
 def get_recent_reminders(
     limit: int = 5,
+    days: int | None = None,
     db: Optional[Session] = None,
     user: Optional[VocabuildaryUser] = None,
     user_id: Optional[int] = None,
@@ -215,9 +234,12 @@ def get_recent_reminders(
 
     try:
         filter_user_id = user.id if user is not None else user_id
-        stmt = select(ReminderLog)
+        stmt = select(ReminderLog).options(joinedload(ReminderLog.word))
         if filter_user_id is not None:
             stmt = stmt.where(ReminderLog.user_id == filter_user_id)
+        if days is not None:
+            days = max(1, min(int(days), 3650))
+            stmt = stmt.where(ReminderLog.reminded_at >= _utc_now() - timedelta(days=days))
         stmt = stmt.order_by(ReminderLog.reminded_at.desc(), ReminderLog.id.desc()).limit(limit)
         return list(db.execute(stmt).scalars())
     finally:
@@ -231,14 +253,59 @@ def _select_new_word(
     settings: UserLearningSettings,
 ) -> Optional[Word]:
     seen_word_ids = select(UserWordProgress.word_id).where(UserWordProgress.user_id == user.id)
-    stmt = (
+    user_level = get_user_language_level(db, user, settings.target_language_code)
+    frequency_band = get_frequency_band_for_level(
+        db,
+        settings.target_language_code,
+        user_level.level_code if user_level is not None else None,
+    )
+
+    def apply_frequency_band(stmt):
+        if frequency_band is None:
+            return stmt
+        if frequency_band.min_frequency_rank is not None:
+            stmt = stmt.where(Word.frequency_rank.is_not(None))
+            stmt = stmt.where(Word.frequency_rank >= frequency_band.min_frequency_rank)
+        if frequency_band.max_frequency_rank is not None:
+            stmt = stmt.where(Word.frequency_rank.is_not(None))
+            stmt = stmt.where(Word.frequency_rank <= frequency_band.max_frequency_rank)
+        return stmt
+
+    book_word_base_stmt = (
+        select(Word)
+        .join(BookWord, BookWord.word_id == Word.id)
+        .join(Book, Book.id == BookWord.book_id)
+        .where(Book.user_id == user.id)
+        .where(Book.learning_enabled.is_(True))
+        .where(BookWord.language_code == settings.target_language_code)
+        .where(Word.id.not_in(seen_word_ids))
+        .order_by(
+            BookWord.rank_in_book.asc().nullslast(),
+            Word.frequency_rank.asc().nullslast(),
+            Word.word.asc(),
+        )
+    )
+    book_word = None
+    if frequency_band is not None:
+        book_word = db.execute(
+            apply_frequency_band(book_word_base_stmt).limit(1)
+        ).scalar_one_or_none()
+    if book_word is None:
+        book_word = db.execute(book_word_base_stmt.limit(1)).scalar_one_or_none()
+    if book_word is not None:
+        return book_word
+
+    base_stmt = (
         select(Word)
         .where(Word.language_code == settings.target_language_code)
         .where(Word.id.not_in(seen_word_ids))
-        .order_by(func.random())
-        .limit(1)
+        .order_by(Word.frequency_rank.asc().nullslast(), func.random())
     )
-    word = db.execute(stmt).scalar_one_or_none()
+    word = None
+    if frequency_band is not None:
+        word = db.execute(apply_frequency_band(base_stmt).limit(1)).scalar_one_or_none()
+    if word is None:
+        word = db.execute(base_stmt.limit(1)).scalar_one_or_none()
     if word is not None:
         return word
 
@@ -389,7 +456,7 @@ def build_daily_learning_plan(
     Create or return today's user-specific learning plan.
 
     The function stages DB rows but does not commit; the caller commits only
-    after Telegram accepts the message.
+    after the notification provider accepts the message.
     """
     settings = get_or_create_learning_settings(db, user)
     if not settings.enabled:
@@ -836,6 +903,30 @@ def get_word_progress_for_user(
     return list(db.execute(stmt).unique().scalars())
 
 
+def get_learnt_words_for_user(
+    db: Session,
+    user: VocabuildaryUser,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[UserWordProgress]:
+    """Return words the user has actually encountered, newest first."""
+    stmt = (
+        select(UserWordProgress)
+        .options(joinedload(UserWordProgress.word))
+        .where(UserWordProgress.user_id == user.id)
+        .where(UserWordProgress.status != "reset")
+        .where(UserWordProgress.encounter_count > 0)
+        .order_by(
+            UserWordProgress.last_seen_at.desc().nullslast(),
+            UserWordProgress.progress_percent.desc(),
+            UserWordProgress.id.desc(),
+        )
+        .offset(max(0, int(offset or 0)))
+        .limit(max(1, min(limit, 500)))
+    )
+    return list(db.execute(stmt).unique().scalars())
+
+
 def serialize_word_progress(progress: UserWordProgress) -> dict:
     """Public progress payload for UI clients."""
     word = progress.word
@@ -844,6 +935,9 @@ def serialize_word_progress(progress: UserWordProgress) -> dict:
         "word": word.word if word else "",
         "meaning": word.meaning if word else "",
         "language_code": word.language_code if word else "",
+        "frequency_rank": word.frequency_rank if word else None,
+        "zipf_frequency": word.zipf_frequency if word else None,
+        "frequency_source": word.frequency_source if word else None,
         "status": progress.status,
         "progress_percent": progress.progress_percent,
         "encounter_count": progress.encounter_count,
@@ -898,28 +992,17 @@ def reset_word_progress(
     return progress
 
 
-def _telegram_for_user(user: VocabuildaryUser) -> TelegramAdapter:
-    return TelegramAdapter(
-        bot_token=user.telegram_bot_token,
-        chat_id=user.telegram_chat_id,
-    )
-
-
-def _legacy_telegram_configured() -> bool:
-    return bool(constants.TELEGRAM_BOT_TOKEN and constants.TELEGRAM_CHAT_ID)
-
-
 def _send_legacy_daily_word(
     db: Session,
-    telegram: TelegramAdapter,
+    notifier: NotificationSender,
 ) -> Tuple[bool, Optional[Word]]:
     word = get_random_unsent_word(db)
     if word is None:
         return False, None
 
     message = build_reminder_message(word)
-    telegram.send_message(message, parse_mode="HTML")
-    logger.info("Sent legacy word to Telegram: %r", word.word)
+    notifier.send_message(message, parse_mode="HTML")
+    logger.info("Sent legacy word notification: %r", word.word)
 
     mark_word_sent(db, word.id)
     log_reminder(db, word, user=None)
@@ -927,24 +1010,55 @@ def _send_legacy_daily_word(
     return True, word
 
 
+def _send_user_notification(
+    db: Session,
+    user: VocabuildaryUser,
+    *,
+    message_text: str,
+    word: Word,
+    session: DailyLearningSession | None,
+    kind: str,
+) -> tuple[bool, int]:
+    """Deliver to the configured external provider and queue mobile notifications."""
+    provider_sent = False
+    if user.provider_configured:
+        notifier = create_notifier_for_user(user)
+        notifier.send_message(message_text, parse_mode="HTML")
+        provider_sent = True
+
+    mobile_count = queue_mobile_notifications_for_user(
+        db,
+        user,
+        title=f"Vocabuildary: {word.word}",
+        body=message_text,
+        html_body=message_text,
+        word=word,
+        session=session,
+        kind=kind,
+    )
+    if not provider_sent and mobile_count == 0:
+        raise RuntimeError("No notification delivery channel is configured.")
+    return provider_sent, mobile_count
+
+
 def send_daily_word(
     db: Optional[Session] = None,
-    telegram: Optional[TelegramAdapter] = None,
+    telegram: Optional[NotificationSender] = None,
     user: Optional[VocabuildaryUser] = None,
 ) -> Tuple[bool, Optional[Word]]:
     """
     Full daily flow: plan, render, send, and then persist progress.
 
     With ``user=None`` this falls back to the old global random-word behavior
-    for legacy environment-based Telegram settings.
+    for legacy environment-based notification settings.
     """
     owns_session = db is None
     db = db or get_db_session()
-    telegram = telegram or (_telegram_for_user(user) if user else TelegramAdapter())
 
     try:
         if user is None:
-            return _send_legacy_daily_word(db, telegram)
+            notifier = telegram or create_legacy_notifier()
+            return _send_legacy_daily_word(db, notifier)
 
         plan = build_daily_learning_plan(db, user)
         if plan is None:
@@ -965,10 +1079,19 @@ def send_daily_word(
             cloze_word=plan.cloze_word,
             previous_cloze=plan.previous_cloze,
         )
-        telegram.send_message(rendered.message, parse_mode="HTML")
+        provider_sent, mobile_count = _send_user_notification(
+            db,
+            user,
+            message_text=rendered.message,
+            word=plan.new_word,
+            session=plan.session,
+            kind="daily",
+        )
         logger.info(
-            "Sent daily learning session to user id=%s word=%r",
+            "Sent daily learning session to user id=%s provider=%s mobile=%s word=%r",
             user.id,
+            notification_provider_label(user.notification_provider) if provider_sent else "none",
+            mobile_count,
             plan.new_word.word,
         )
 
@@ -997,7 +1120,7 @@ def send_daily_word(
 
 def send_test_notification(
     db: Optional[Session] = None,
-    telegram: Optional[TelegramAdapter] = None,
+    telegram: Optional[NotificationSender] = None,
     user: Optional[VocabuildaryUser] = None,
 ) -> Tuple[bool, Optional[Word]]:
     """
@@ -1005,15 +1128,15 @@ def send_test_notification(
     """
     owns_session = db is None
     db = db or get_db_session()
-    telegram = telegram or (_telegram_for_user(user) if user else TelegramAdapter())
 
     try:
         if user is None:
+            notifier = telegram or create_legacy_notifier()
             word = get_random_unsent_word(db)
             if word is None:
                 return False, None
             message = build_reminder_message(word)
-            telegram.send_message(message, parse_mode="HTML")
+            notifier.send_message(message, parse_mode="HTML")
             db.rollback()
             return True, word
 
@@ -1028,9 +1151,26 @@ def send_test_notification(
             cloze_word=plan.cloze_word,
             previous_cloze=plan.previous_cloze,
         )
-        telegram.send_message(rendered.message, parse_mode="HTML")
+        if user.provider_configured:
+            notifier = telegram or create_notifier_for_user(user)
+            notifier.send_message(rendered.message, parse_mode="HTML")
+        else:
+            word = plan.new_word
+            db.rollback()
+            queue_mobile_notifications_for_user(
+                db,
+                user,
+                title=f"Vocabuildary test: {word.word}",
+                body=rendered.message,
+                html_body=rendered.message,
+                word=word,
+                session=None,
+                kind="test",
+            )
+            db.commit()
         logger.info("Sent test notification for %r without mutating state", plan.new_word.word)
-        db.rollback()
+        if user.provider_configured:
+            db.rollback()
         return True, plan.new_word
     finally:
         if owns_session:
@@ -1039,9 +1179,9 @@ def send_test_notification(
 
 def send_daily_words_to_configured_users(db: Optional[Session] = None) -> list[SendResult]:
     """
-    Send one daily learning message to every user with saved Telegram settings.
+    Send one daily learning message to every user with saved notification settings.
 
-    If no users have settings yet, fall back to the legacy env-based Telegram
+    If no users have settings yet, fall back to the legacy env-based
     configuration during the rollout window.
     """
     owns_session = db is None
@@ -1050,11 +1190,11 @@ def send_daily_words_to_configured_users(db: Optional[Session] = None) -> list[S
     try:
         users = get_configured_users(db)
         if not users:
-            if not _legacy_telegram_configured():
-                logger.warning("No users have Telegram settings configured.")
+            if not legacy_notification_configured():
+                logger.warning("No users have notification settings configured.")
                 return []
 
-            success, word = send_daily_word(db=db, telegram=TelegramAdapter())
+            success, word = send_daily_word(db=db, telegram=create_legacy_notifier())
             return [SendResult(success=success, word=word, user=None)]
 
         results: list[SendResult] = []

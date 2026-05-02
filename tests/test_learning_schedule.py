@@ -19,6 +19,7 @@ from app.services.word_service import (
     send_daily_word,
     update_daily_learning_plan,
 )
+from app.services.user_service import get_configured_users
 
 
 class FakeTelegram:
@@ -89,6 +90,56 @@ class LearningScheduleTests(unittest.TestCase):
         self.assertGreater(progress.progress_percent, 0)
         exposure = db.query(UserWordExposure).one()
         self.assertEqual(exposure.exposure_kind, "new_word")
+        db.close()
+
+    def test_apprise_provider_is_selected_for_user_send(self):
+        db, user = self._seed_user_and_words()
+        user.notification_provider = "apprise"
+        user.apprise_urls = "json://example.test"
+        db.commit()
+        notifier = FakeTelegram()
+        rendered = RenderedReminderMessage(
+            message="apprise lesson",
+            content=ReminderContent(
+                paragraph="paragraph",
+                history="history",
+                etymology="etymology",
+                cloze_prompt="",
+            ),
+        )
+
+        with patch("app.services.notification_service.AppriseAdapter", return_value=notifier):
+            with patch("app.services.word_service.render_reminder_message", return_value=rendered):
+                success, word = send_daily_word(db=db, user=user)
+
+        self.assertTrue(success)
+        self.assertIsNotNone(word)
+        self.assertEqual(notifier.messages, [("apprise lesson", "HTML")])
+        db.close()
+
+    def test_get_configured_users_includes_selected_apprise_users(self):
+        db = self.Session()
+        apprise_user = VocabuildaryUser(
+            identity_key="apprise-user",
+            notification_provider="apprise",
+            apprise_urls="json://example.test",
+        )
+        telegram_user = VocabuildaryUser(
+            identity_key="telegram-user",
+            notification_provider="telegram",
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+        incomplete_user = VocabuildaryUser(
+            identity_key="incomplete-user",
+            notification_provider="apprise",
+        )
+        db.add_all([apprise_user, telegram_user, incomplete_user])
+        db.commit()
+
+        users = get_configured_users(db)
+
+        self.assertEqual([user.identity_key for user in users], ["apprise-user", "telegram-user"])
         db.close()
 
     def test_next_day_plan_uses_due_word_as_cloze_review(self):

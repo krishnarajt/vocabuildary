@@ -19,6 +19,8 @@ dependencies = [
     "ebooklib>=0.20",
     "beautifulsoup4>=4.14.3",
     "mobi>=0.4.1",
+    "wordfreq>=3.1.1",
+    "apprise>=1.9.2",
 ]
 
 [build-system]
