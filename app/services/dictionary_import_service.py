@@ -397,6 +397,7 @@ def _upsert_frequency_rows(rows: list[dict[str, Any]], language_code: str) -> tu
     if not rows:
         return 0, 0
 
+    rows = [_normalize_word_upsert_row(row) for row in rows]
     words = [row["word"] for row in rows]
     db = get_db_session()
     try:
@@ -628,6 +629,7 @@ def _upsert_definition_rows(
     if not rows:
         return 0, 0, 0
 
+    rows = [_normalize_word_upsert_row(row) for row in rows]
     words = [row["word"] for row in rows]
     db = get_db_session()
     try:
@@ -691,3 +693,12 @@ def _fill_if_empty(existing_col: Any, excluded_col: Any) -> Any:
         ),
         else_=existing_col,
     )
+
+
+def _normalize_word_upsert_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Map external payload keys to ORM attribute names for Word upserts."""
+    if "metadata" not in row or "word_metadata" in row:
+        return row
+    normalized = dict(row)
+    normalized["word_metadata"] = normalized.pop("metadata")
+    return normalized
