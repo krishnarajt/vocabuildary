@@ -45,7 +45,6 @@ TELEGRAM_BOT_TOKEN: str = _get_required("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID: str = _get_required("TELEGRAM_CHAT_ID")
 
 # ===== LLM Gateway =====
-# Not used yet by any business logic — wired up so v2 can plug in instantly.
 LLM_GATEWAY_URL: str = os.getenv(
     "LLM_GATEWAY_URL",
     "https://llmgateway.krishnarajthadesar.in",
@@ -55,11 +54,10 @@ LLM_GATEWAY_DEFAULT_MODEL: str = os.getenv(
     "LLM_GATEWAY_DEFAULT_MODEL",
     "gemini-flash-latest",
 )
-# Path on the gateway that speaks the chat-completions protocol. Kept
-# configurable since the gateway's exact routing may evolve.
+# Path on the gateway that speaks the native LLMGateway chat protocol.
 LLM_GATEWAY_CHAT_PATH: str = os.getenv(
     "LLM_GATEWAY_CHAT_PATH",
-    "/api/chat/completions",
+    "/api/chat",
 )
 
 # ===== Import job =====

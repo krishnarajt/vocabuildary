@@ -15,11 +15,11 @@ services:
       # Telegram
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID must be set in .env}
-      # LLM Gateway (not used yet but plumbed through)
+      # LLM Gateway
       - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-https://llmgateway.krishnarajthadesar.in}
       - LLM_GATEWAY_API_KEY=${LLM_GATEWAY_API_KEY:-}
       - LLM_GATEWAY_DEFAULT_MODEL=${LLM_GATEWAY_DEFAULT_MODEL:-gemini-flash-latest}
-      - LLM_GATEWAY_CHAT_PATH=${LLM_GATEWAY_CHAT_PATH:-/api/chat/completions}
+      - LLM_GATEWAY_CHAT_PATH=${LLM_GATEWAY_CHAT_PATH:-/api/chat}
       # Import
       - WORDS_CSV_PATH=/app/words.csv
     volumes:

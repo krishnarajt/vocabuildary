@@ -29,7 +29,11 @@ def _html(text: str) -> str:
 
 
 def _extract_content(response: dict) -> str:
-    """Pull the assistant text out of an OpenAI-style chat response."""
+    """Pull the assistant text out of a gateway or OpenAI-style chat response."""
+    content = response.get("content")
+    if isinstance(content, str):
+        return content.strip()
+
     try:
         return response["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
