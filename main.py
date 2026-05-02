@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.common import constants
 from app.common.logging_config import setup_logging
 from app.db.database import init_db
-from app.services.word_service import send_daily_word
+from app.services.word_service import send_daily_words_to_configured_users
 from app.ui.server import UIServer
 from jobs.import_words import import_words_from_csv
 
@@ -34,11 +34,19 @@ logger = setup_logging(job_name="vocabuildary")
 def _run_send_daily_word() -> None:
     """Sync wrapper the scheduler calls — never lets an exception escape."""
     try:
-        success, word = send_daily_word()
-        if success and word:
-            logger.info(f"Scheduled run OK — sent {word.word!r}")
+        results = send_daily_words_to_configured_users()
+        successes = [result for result in results if result.success]
+        failures = [result for result in results if not result.success]
+        if successes:
+            word = successes[0].word
+            logger.info(
+                "Scheduled run OK — sent %r to %s recipient(s), %s failure(s)",
+                word.word if word else None,
+                len(successes),
+                len(failures),
+            )
         else:
-            logger.warning("Scheduled run: no word was sent (empty table?).")
+            logger.warning("Scheduled run: no word was sent.")
     except Exception as e:
         logger.error(f"Scheduled run failed: {e}", exc_info=True)
 
@@ -50,7 +58,7 @@ async def _amain() -> int:
 
     # ---- Startup: ensure schema + tables exist ----
     try:
-        init_db()
+        init_db(use_alembic=True)
         logger.info("✓ Database initialized")
     except Exception as e:
         logger.critical(f"✗ Database init failed: {e}", exc_info=True)

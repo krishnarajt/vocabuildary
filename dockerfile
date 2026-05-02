@@ -27,6 +27,8 @@ RUN uv sync --frozen --no-dev 2>/dev/null || uv sync --no-dev
 # Copy source
 COPY app ./app
 COPY jobs ./jobs
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 COPY main.py ./main.py
 COPY words.csv ./words.csv
 

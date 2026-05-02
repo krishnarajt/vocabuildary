@@ -41,8 +41,30 @@ DATABASE_URL: str = _get_required("DATABASE_URL")
 DB_SCHEMA: str = os.getenv("DB_SCHEMA", "vocabuildary")
 
 # ===== Telegram =====
-TELEGRAM_BOT_TOKEN: str = _get_required("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID: str = _get_required("TELEGRAM_CHAT_ID")
+# Legacy fallback only. New installs store Telegram destination settings per
+# Authentik user in the database, populated through the UI.
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ===== Book storage =====
+# S3-compatible object storage. The env var names intentionally match the
+# Just Like Clockwork backend so both apps can share the same deployment
+# convention while using different buckets/prefixes.
+MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_BUCKET: str = os.getenv("MINIO_BUCKET", "vocabuildary-books")
+MINIO_REGION: str = os.getenv("MINIO_REGION", "us-east-1")
+
+BOOK_UPLOAD_URL_EXPIRATION_SECONDS: int = int(
+    os.getenv("BOOK_UPLOAD_URL_EXPIRATION_SECONDS", "900")
+)
+BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS: int = int(
+    os.getenv("BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS", "3600")
+)
+MAX_BOOK_UPLOAD_BYTES: int = int(
+    os.getenv("MAX_BOOK_UPLOAD_BYTES", str(500 * 1024 * 1024))
+)
 
 # ===== LLM Gateway =====
 LLM_GATEWAY_URL: str = os.getenv(
@@ -64,3 +86,32 @@ LLM_GATEWAY_CHAT_PATH: str = os.getenv(
 # Path to the CSV file consumed by the startup importer / jobs/import_words.py.
 # Baked into the image at build time by default.
 WORDS_CSV_PATH: str = os.getenv("WORDS_CSV_PATH", "/app/words.csv")
+
+# ===== Learning schedule defaults =====
+# These are only defaults for newly-created per-user settings. Users can tune
+# their own reminder cadence in the database/UI without changing the global
+# dictionary rows.
+DEFAULT_DAILY_REVIEW_WORDS: int = int(os.getenv("DEFAULT_DAILY_REVIEW_WORDS", "3"))
+DEFAULT_DAILY_CLOZE_WORDS: int = int(os.getenv("DEFAULT_DAILY_CLOZE_WORDS", "1"))
+DEFAULT_MASTERY_ENCOUNTERS: int = int(os.getenv("DEFAULT_MASTERY_ENCOUNTERS", "8"))
+DEFAULT_TARGET_LANGUAGE_CODE: str = os.getenv("DEFAULT_TARGET_LANGUAGE_CODE", "en")
+
+
+def _parse_review_intervals(value: str) -> list[int]:
+    intervals: list[int] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            interval = int(part)
+        except ValueError:
+            continue
+        if interval > 0:
+            intervals.append(interval)
+    return intervals or [1, 3, 7, 14, 30, 60, 120]
+
+
+DEFAULT_REVIEW_INTERVAL_DAYS: list[int] = _parse_review_intervals(
+    os.getenv("DEFAULT_REVIEW_INTERVAL_DAYS", "1,3,7,14,30,60,120")
+)

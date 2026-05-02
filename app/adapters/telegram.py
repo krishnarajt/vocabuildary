@@ -26,6 +26,11 @@ class TelegramAdapter:
     ) -> None:
         self.bot_token = bot_token or constants.TELEGRAM_BOT_TOKEN
         self.chat_id = chat_id or constants.TELEGRAM_CHAT_ID
+        if not self.bot_token or not self.chat_id:
+            raise RuntimeError(
+                "Telegram bot token and chat id are required. Configure them "
+                "for the signed-in user in Vocabuildary."
+            )
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.timeout = timeout
 

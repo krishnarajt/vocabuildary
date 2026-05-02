@@ -65,8 +65,14 @@ def get_db_session() -> Session:
     return SessionLocal()
 
 
-def init_db() -> None:
-    """Create all tables. Idempotent — safe to call on every job start."""
+def init_db(use_alembic: bool = False) -> None:
+    """
+    Initialize the database.
+
+    Production startup should pass use_alembic=True so every schema change is
+    applied through versioned migrations. create_all() remains as a quick local
+    fallback for ad-hoc development only.
+    """
     # Import models so they register with Base.metadata before create_all.
     from app.db import models  # noqa: F401
 
@@ -75,7 +81,17 @@ def init_db() -> None:
         _safe_database_url(),
         constants.DB_SCHEMA,
     )
-    Base.metadata.create_all(bind=engine)
+    if use_alembic:
+        from alembic import command
+        from alembic.config import Config
+
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Database migrated via Alembic")
+    else:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created via create_all()")
+
     inspector = inspect(engine)
     words_exists = inspector.has_table("words", schema=constants.DB_SCHEMA or None)
     logger.info(

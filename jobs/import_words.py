@@ -32,7 +32,13 @@ def import_words_from_csv(csv_path: str) -> tuple[int, int]:
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Expecting columns: word, meaning, example
+                # Expecting columns: word, meaning, example. Richer dictionaries
+                # may also include language_code, pronunciation, etymology, etc.
+                language_code = (
+                    row.get("language_code")
+                    or row.get("language")
+                    or constants.DEFAULT_TARGET_LANGUAGE_CODE
+                ).strip()
                 word_value = (row.get("word") or "").strip()
                 meaning_value = (row.get("meaning") or "").strip()
                 example_value = (row.get("example") or "").strip()
@@ -42,12 +48,21 @@ def import_words_from_csv(csv_path: str) -> tuple[int, int]:
                 stmt = (
                     pg_insert(Word)
                     .values(
+                        language_code=language_code,
                         word=word_value,
                         meaning=meaning_value,
                         example=example_value,
+                        part_of_speech=(row.get("part_of_speech") or "").strip() or None,
+                        pronunciation=(row.get("pronunciation") or "").strip() or None,
+                        origin_language=(row.get("origin_language") or "").strip() or None,
+                        etymology=(row.get("etymology") or "").strip() or None,
+                        register=(row.get("register") or "").strip() or None,
+                        difficulty_level=int(row["difficulty_level"])
+                        if (row.get("difficulty_level") or "").strip().isdigit()
+                        else None,
                         sent=False,
                     )
-                    .on_conflict_do_nothing(index_elements=["word"])
+                    .on_conflict_do_nothing(index_elements=["language_code", "word"])
                 )
                 result = db.execute(stmt)
                 # rowcount == 1 means we actually inserted; 0 means skipped
@@ -70,7 +85,7 @@ def main() -> int:
     logger_local.info("=" * 60)
 
     try:
-        init_db()
+        init_db(use_alembic=True)
     except Exception as e:
         logger_local.critical(f"Database init failed: {e}", exc_info=True)
         return 2

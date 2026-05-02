@@ -13,7 +13,7 @@ import sys
 
 from app.common.logging_config import setup_logging
 from app.db.database import init_db
-from app.services.word_service import send_daily_word
+from app.services.word_service import send_daily_words_to_configured_users
 
 
 def main() -> int:
@@ -23,18 +23,24 @@ def main() -> int:
     logger.info("=" * 60)
 
     try:
-        # Idempotent — creates the words table on first run.
-        init_db()
+        # Idempotent — applies the learning-progress schema before sending.
+        init_db(use_alembic=True)
     except Exception as e:
         logger.critical(f"Database init failed: {e}", exc_info=True)
         return 2
 
     try:
-        success, word = send_daily_word()
-        if not success:
-            logger.warning("No word was sent (empty table?).")
+        results = send_daily_words_to_configured_users()
+        successes = [result for result in results if result.success]
+        if not successes:
+            logger.warning("No word was sent.")
             return 1
-        logger.info(f"Done. Sent: {word.word!r}")
+        word = successes[0].word
+        logger.info(
+            "Done. Sent %r to %s recipient(s).",
+            word.word if word else None,
+            len(successes),
+        )
         return 0
     except Exception as e:
         logger.error(f"send_daily_word failed: {e}", exc_info=True)
