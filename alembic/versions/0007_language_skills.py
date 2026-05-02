@@ -217,7 +217,7 @@ def _seed_default_quizzes() -> None:
     quizzes = sa.Table(
         "language_quizzes",
         metadata,
-        sa.Column("id", sa.Integer()),
+        sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("language_code", sa.Text()),
         sa.Column("title", sa.Text()),
         sa.Column("source", sa.Text()),
