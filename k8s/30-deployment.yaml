@@ -38,7 +38,7 @@ spec:
       containers:
         - name: vocabuildary
           # Replace with your registry path once you publish the image.
-          image: ghcr.io/krishnarajt/vocabuildary:git-e5e6f382b82f3f085581ff04bd9352dbd5967fdf
+          image: ghcr.io/krishnarajt/vocabuildary:git-8429e3a7734794c9667404434e67a524d7df73d9
           imagePullPolicy: Always
           command: ["python", "main.py"]
           envFrom:
