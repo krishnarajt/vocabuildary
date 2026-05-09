@@ -1,5 +1,6 @@
 import os
 import unittest
+from io import BytesIO
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("DB_SCHEMA", "")
@@ -32,6 +33,30 @@ class UIServicePathTests(unittest.TestCase):
             redirected,
             "com.kptgames.vocabuildary://auth?state=abc&token=vbt_secret&token_type=Bearer",
         )
+
+    def test_write_response_swallows_client_disconnect(self):
+        handler = _UIRequestHandler.__new__(_UIRequestHandler)
+        handler.command = "POST"
+        handler.path = "/test-trigger"
+        handler.close_connection = False
+        handler.wfile = _BrokenWriter()
+        handler.send_response = lambda status: None
+        handler.send_header = lambda key, value: None
+        handler._send_cors_headers = lambda: None
+        handler.end_headers = lambda: None
+
+        handler._write_response(
+            status=200,
+            body=b'{"ok": true}',
+            content_type="application/json; charset=utf-8",
+        )
+
+        self.assertTrue(handler.close_connection)
+
+
+class _BrokenWriter(BytesIO):
+    def write(self, data):  # type: ignore[override]
+        raise BrokenPipeError(32, "Broken pipe")
 
 
 if __name__ == "__main__":

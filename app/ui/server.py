@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import threading
@@ -1940,30 +1941,66 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("UI %s - %s", self.address_string(), format % args)
 
+    @staticmethod
+    def _is_client_disconnect_error(exc: OSError) -> bool:
+        return isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)) or (
+            getattr(exc, "errno", None) in {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}
+        )
+
+    def _write_response(
+        self,
+        *,
+        status: HTTPStatus,
+        body: bytes = b"",
+        content_type: str | None = None,
+        extra_headers: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.send_response(status)
+        if content_type is not None:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for header, value in extra_headers or []:
+            self.send_header(header, value)
+        self._send_cors_headers()
+        try:
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except OSError as exc:
+            if self._is_client_disconnect_error(exc):
+                logger.info(
+                    "Client disconnected before response completed: method=%s path=%s",
+                    getattr(self, "command", "?"),
+                    getattr(self, "path", "?"),
+                )
+                self.close_connection = True
+                return
+            raise
+
     def _send_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(encoded)
+        self._write_response(
+            status=status,
+            body=encoded,
+            content_type="text/html; charset=utf-8",
+        )
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(encoded)
+        self._write_response(
+            status=status,
+            body=encoded,
+            content_type="application/json; charset=utf-8",
+        )
 
     def _send_redirect(self, location: str) -> None:
-        self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Location", location)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._write_response(
+            status=HTTPStatus.SEE_OTHER,
+            extra_headers=[
+                ("Location", location),
+                ("Cache-Control", "no-store"),
+            ],
+        )
 
     def _send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
