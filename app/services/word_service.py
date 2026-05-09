@@ -718,6 +718,28 @@ def rebuild_daily_learning_plan(
     return build_daily_learning_plan(db, user, study_date=study_date)
 
 
+def _build_test_learning_plan(
+    db: Session,
+    user: VocabuildaryUser,
+    study_date: date | None = None,
+) -> Optional[DailyLearningPlan]:
+    """Force test sends to exercise fresh selection for unsent previews."""
+    study_date = study_date or _learning_today()
+    existing = db.execute(
+        select(DailyLearningSession)
+        .where(DailyLearningSession.user_id == user.id)
+        .where(DailyLearningSession.session_date == study_date)
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if existing is not None and existing.sent_at is None:
+        _drop_unsent_preview_progress(db, user, existing)
+        db.delete(existing)
+        db.flush()
+
+    return build_daily_learning_plan(db, user, study_date=study_date)
+
+
 def _parse_optional_word_id(value: object) -> int | None:
     if value in (None, "", False):
         return None
@@ -1209,7 +1231,7 @@ def send_test_notification(
             db.rollback()
             return True, word
 
-        plan = build_daily_learning_plan(db, user)
+        plan = _build_test_learning_plan(db, user)
         if plan is None:
             db.rollback()
             return False, None

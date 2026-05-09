@@ -72,8 +72,10 @@ Each daily session chooses one new word, a configurable number of review words,
 and one optional fill-in-the-blank review. Review words are passed to the LLM so
 they can be woven into the new word's paragraph/history as extra encounters. The
 blank answer is stored with the session and revealed on the user's next daily
-message. Progress percentages are estimated from planned encounters and the
-user's configured mastery target, and can be reset per word from the UI/API.
+message. Test reminders now rebuild any unsent preview first, so the button
+exercises the same frequency-band word selection logic as a fresh daily pick.
+Progress percentages are estimated from planned encounters and the user's
+configured mastery target, and can be reset per word from the UI/API.
 
 ## Book Uploads
 

@@ -12,11 +12,13 @@ os.environ.setdefault("DB_SCHEMA", "")
 from app.db.database import Base
 from app.db.models import UserWordExposure, UserWordProgress, VocabuildaryUser, Word
 from app.services.reminder_content_service import ReminderContent, RenderedReminderMessage
+from app.services.language_skill_service import set_user_language_level
 from app.services.word_service import (
     LearningPlanLockedError,
     build_daily_learning_plan,
     rebuild_daily_learning_plan,
     send_daily_word,
+    send_test_notification,
     update_daily_learning_plan,
 )
 from app.services.user_service import get_configured_users
@@ -223,6 +225,63 @@ class LearningScheduleTests(unittest.TestCase):
 
         with self.assertRaises(LearningPlanLockedError):
             rebuild_daily_learning_plan(db, user, study_date=study_date)
+        db.close()
+
+    def test_test_notification_rebuilds_unsent_preview_before_sending(self):
+        db = self.Session()
+        user = VocabuildaryUser(
+            identity_key="user-1",
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+        db.add(user)
+        db.add_all(
+            [
+                Word(
+                    language_code="en",
+                    word="apple",
+                    meaning="fruit",
+                    example="An apple fell.",
+                    frequency_rank=100,
+                ),
+                Word(
+                    language_code="en",
+                    word="anomaly",
+                    meaning="something unusual",
+                    example="The anomaly stood out.",
+                    frequency_rank=3000,
+                ),
+            ]
+        )
+        db.commit()
+        db.refresh(user)
+
+        preview = build_daily_learning_plan(db, user, study_date=date(2026, 5, 10))
+        self.assertIsNotNone(preview)
+        self.assertEqual(preview.new_word.word, "apple")
+
+        set_user_language_level(db, user, "en", "B1")
+        telegram = FakeTelegram()
+        rendered = RenderedReminderMessage(
+            message="lesson",
+            content=ReminderContent(
+                paragraph="paragraph",
+                history="history",
+                etymology="etymology",
+                cloze_prompt="",
+            ),
+        )
+
+        with patch("app.services.word_service._learning_today", return_value=date(2026, 5, 10)):
+            with patch("app.services.word_service.render_reminder_message", return_value=rendered):
+                success, word = send_test_notification(db=db, telegram=telegram, user=user)
+
+        self.assertTrue(success)
+        self.assertIsNotNone(word)
+        self.assertEqual(word.word, "anomaly")
+        self.assertEqual(telegram.messages, [("lesson", "HTML")])
+        self.assertEqual(db.query(UserWordProgress).count(), 0)
+        self.assertEqual(db.query(Word).count(), 2)
         db.close()
 
 
