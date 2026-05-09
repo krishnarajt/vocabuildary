@@ -582,14 +582,21 @@ def serialize_user_language_level(level: UserLanguageLevel | None) -> dict[str, 
 
 
 def _serialize_skill(language: dict[str, Any], level: UserLanguageLevel | None, db: Session) -> dict[str, Any]:
+    bands = ensure_default_frequency_bands(db, language["code"])
+    bands_by_level = {band.level_code: band for band in bands}
     band = None
     if level is not None:
-        band = get_frequency_band_for_level(db, language["code"], level.level_code)
+        band = bands_by_level.get(level.level_code) or get_frequency_band_for_level(
+            db,
+            language["code"],
+            level.level_code,
+        )
     quiz = _get_quiz(db, language["code"], create_default=False)
     return {
         "language": language,
         "level": serialize_user_language_level(level),
         "frequency_band": _serialize_frequency_band(band),
+        "frequency_bands": [_serialize_frequency_band(band) for band in bands],
         "quiz_available": quiz is not None,
         "quiz_id": quiz.id if quiz else None,
         "quiz_source": quiz.source if quiz else None,

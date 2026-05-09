@@ -1,70 +1,85 @@
+name: vocabuildary-local
+
 services:
   vocabuildary:
-    build: .
-    container_name: vocabuildary
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: vocabuildary-api:local
+    container_name: vocabuildary-api
     environment:
-      # App
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_DIR=/app/logs
-      - TZ=${TZ:-Asia/Kolkata}
-      - SEND_WORD_CRON=${SEND_WORD_CRON:-0 9 * * *}
-      # DB — points at the local `postgres` service below for dev convenience.
-      # In prod, DATABASE_URL lives in Vault and points at your real Postgres.
-      - DATABASE_URL=postgresql+psycopg://vocabuildary:vocabuildary@postgres:5432/vocabuildary
-      - DB_SCHEMA=${DB_SCHEMA:-vocabuildary}
-      # Telegram legacy fallback. Normal user-specific settings live in DB.
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      # Book storage
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-http://minio:9000}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_BUCKET=${MINIO_BUCKET:-vocabuildary-books}
-      - MINIO_REGION=${MINIO_REGION:-us-east-1}
-      - BOOK_UPLOAD_URL_EXPIRATION_SECONDS=${BOOK_UPLOAD_URL_EXPIRATION_SECONDS:-900}
-      - BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS=${BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS:-3600}
-      - MAX_BOOK_UPLOAD_BYTES=${MAX_BOOK_UPLOAD_BYTES:-524288000}
-      # LLM Gateway
-      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-https://llmgateway.krishnarajthadesar.in}
-      - LLM_GATEWAY_API_KEY=${LLM_GATEWAY_API_KEY:-}
-      - LLM_GATEWAY_DEFAULT_MODEL=${LLM_GATEWAY_DEFAULT_MODEL:-gemini-flash-latest}
-      - LLM_GATEWAY_CHAT_PATH=${LLM_GATEWAY_CHAT_PATH:-/api/chat}
-      # Import
-      - WORDS_CSV_PATH=/app/words.csv
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_DIR: /app/logs
+      TZ: ${TZ:-Asia/Kolkata}
+      SEND_WORD_CRON: ${SEND_WORD_CRON:-0 9 * * *}
+      REMINDER_SLOT_POLL_SECONDS: ${REMINDER_SLOT_POLL_SECONDS:-60}
+      DATABASE_URL: sqlite:////app/data/vocabuildary.sqlite3
+      DB_SCHEMA: ""
+      LOCAL_DEV_AUTH_ENABLED: "true"
+      LOCAL_DEV_USER_SUB: local-dev-user
+      LOCAL_DEV_USER_EMAIL: local@vocabuildary.dev
+      LOCAL_DEV_USER_NAME: Local Vocabuildary
+      LOCAL_DEV_CORS_ORIGINS: ${LOCAL_DEV_CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      APPRISE_URLS: ${APPRISE_URLS:-}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vocabuildary-books}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+      BOOK_UPLOAD_URL_EXPIRATION_SECONDS: ${BOOK_UPLOAD_URL_EXPIRATION_SECONDS:-900}
+      BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS: ${BOOK_DOWNLOAD_URL_EXPIRATION_SECONDS:-3600}
+      MAX_BOOK_UPLOAD_BYTES: ${MAX_BOOK_UPLOAD_BYTES:-524288000}
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://llm-gateway.local}
+      LLM_GATEWAY_API_KEY: ${LLM_GATEWAY_API_KEY:-}
+      LLM_GATEWAY_DEFAULT_MODEL: ${LLM_GATEWAY_DEFAULT_MODEL:-gemini-flash-latest}
+      LLM_GATEWAY_CHAT_PATH: ${LLM_GATEWAY_CHAT_PATH:-/api/chat}
+      WORDS_CSV_PATH: /app/words.csv
     volumes:
-      - app_logs:/app/logs
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - vocabuildary_data:/app/data
+      - vocabuildary_logs:/app/logs
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
     networks:
       - vocabuildary-network
 
-  # Optional local Postgres — skip with `docker compose up vocabuildary`
-  # if you want to point DATABASE_URL at an external Postgres instead.
-  postgres:
-    image: postgres:15-alpine
-    container_name: vocabuildary-postgres
-    environment:
-      - POSTGRES_USER=vocabuildary
-      - POSTGRES_PASSWORD=vocabuildary
-      - POSTGRES_DB=vocabuildary
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+  vocabuildary-ui:
+    build:
+      context: ../vocabuildary_ui
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_AUTH_API_BASE_URL: http://localhost:${VOCABUILDARY_UI_PORT:-3001}
+        NEXT_PUBLIC_VOCABUILDARY_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_LOCAL_DEV_AUTH_ENABLED: "true"
+        NEXT_PUBLIC_LOCAL_DEV_USER_SUB: local-dev-user
+        NEXT_PUBLIC_LOCAL_DEV_USER_EMAIL: local@vocabuildary.dev
+        NEXT_PUBLIC_LOCAL_DEV_USER_NAME: Local Vocabuildary
+    image: vocabuildary-ui:local
+    container_name: vocabuildary-ui
+    depends_on:
+      vocabuildary:
+        condition: service_healthy
     ports:
-      - "5433:5432"  # 5433 host-side so it doesn't clash with LLMGateway's 5432
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vocabuildary -d vocabuildary"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      - "${VOCABUILDARY_UI_PORT:-3001}:3000"
     restart: unless-stopped
     networks:
       - vocabuildary-network
 
 volumes:
-  postgres_data:
-  app_logs:
+  vocabuildary_data:
+  vocabuildary_logs:
 
 networks:
   vocabuildary-network:

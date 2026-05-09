@@ -51,10 +51,12 @@ from app.services.mobile_notification_service import queue_mobile_notifications_
 from app.services.user_service import (
     get_configured_users,
     get_or_create_learning_settings,
+    learning_language_codes,
     serialize_learning_settings,
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_RECOMMENDATION_LEVEL = "B1"
 
 
 @dataclass(frozen=True)
@@ -251,16 +253,17 @@ def _select_new_word(
     db: Session,
     user: VocabuildaryUser,
     settings: UserLearningSettings,
+    study_date: date,
 ) -> Optional[Word]:
     seen_word_ids = select(UserWordProgress.word_id).where(UserWordProgress.user_id == user.id)
-    user_level = get_user_language_level(db, user, settings.target_language_code)
-    frequency_band = get_frequency_band_for_level(
-        db,
-        settings.target_language_code,
-        user_level.level_code if user_level is not None else None,
-    )
+    language_codes = _rotated_language_codes(learning_language_codes(settings), user, study_date)
 
-    def apply_frequency_band(stmt):
+    def frequency_band_for_language(language_code: str):
+        user_level = get_user_language_level(db, user, language_code)
+        level_code = user_level.level_code if user_level is not None else DEFAULT_RECOMMENDATION_LEVEL
+        return get_frequency_band_for_level(db, language_code, level_code)
+
+    def apply_frequency_band(stmt, frequency_band):
         if frequency_band is None:
             return stmt
         if frequency_band.min_frequency_rank is not None:
@@ -271,52 +274,83 @@ def _select_new_word(
             stmt = stmt.where(Word.frequency_rank <= frequency_band.max_frequency_rank)
         return stmt
 
-    book_word_base_stmt = (
-        select(Word)
-        .join(BookWord, BookWord.word_id == Word.id)
-        .join(Book, Book.id == BookWord.book_id)
-        .where(Book.user_id == user.id)
-        .where(Book.learning_enabled.is_(True))
-        .where(BookWord.language_code == settings.target_language_code)
-        .where(Word.id.not_in(seen_word_ids))
-        .order_by(
-            BookWord.rank_in_book.asc().nullslast(),
-            Word.frequency_rank.asc().nullslast(),
-            Word.word.asc(),
+    def book_word_stmt(language_code: str):
+        return (
+            select(Word)
+            .join(BookWord, BookWord.word_id == Word.id)
+            .join(Book, Book.id == BookWord.book_id)
+            .where(Book.user_id == user.id)
+            .where(Book.learning_enabled.is_(True))
+            .where(BookWord.language_code == language_code)
+            .where(Word.id.not_in(seen_word_ids))
+            .order_by(
+                BookWord.rank_in_book.asc().nullslast(),
+                Word.frequency_rank.asc().nullslast(),
+                Word.word.asc(),
+            )
         )
-    )
-    book_word = None
-    if frequency_band is not None:
-        book_word = db.execute(
-            apply_frequency_band(book_word_base_stmt).limit(1)
+
+    def global_word_stmt(language_code: str):
+        return (
+            select(Word)
+            .where(Word.language_code == language_code)
+            .where(Word.id.not_in(seen_word_ids))
+            .order_by(Word.frequency_rank.asc().nullslast(), func.random())
+        )
+
+    # First preference: words from the user's enabled books that fit their
+    # selected skill band for the language. This keeps book vocabulary ahead of
+    # generic corpus vocabulary without letting ultra-basic function words win.
+    language_bands = {
+        language_code: frequency_band_for_language(language_code)
+        for language_code in language_codes
+    }
+    for language_code in language_codes:
+        word = db.execute(
+            apply_frequency_band(book_word_stmt(language_code), language_bands[language_code])
+            .limit(1)
         ).scalar_one_or_none()
-    if book_word is None:
-        book_word = db.execute(book_word_base_stmt.limit(1)).scalar_one_or_none()
-    if book_word is not None:
-        return book_word
+        if word is not None:
+            return word
 
-    base_stmt = (
-        select(Word)
-        .where(Word.language_code == settings.target_language_code)
-        .where(Word.id.not_in(seen_word_ids))
-        .order_by(Word.frequency_rank.asc().nullslast(), func.random())
-    )
-    word = None
-    if frequency_band is not None:
-        word = db.execute(apply_frequency_band(base_stmt).limit(1)).scalar_one_or_none()
-    if word is None:
-        word = db.execute(base_stmt.limit(1)).scalar_one_or_none()
-    if word is not None:
-        return word
+    # Second preference: any catalog word in the user's skill band.
+    for language_code in language_codes:
+        word = db.execute(
+            apply_frequency_band(global_word_stmt(language_code), language_bands[language_code])
+            .limit(1)
+        ).scalar_one_or_none()
+        if word is not None:
+            return word
 
-    # If the user has already touched every word in the target language, keep
-    # the ritual alive by revisiting the least-progressed word as the primary.
+    # Third preference: unranked or not-too-basic book words. This is important
+    # for books imported before frequency enrichment has caught up.
+    for language_code in language_codes:
+        stmt = _exclude_below_band_floor(
+            book_word_stmt(language_code),
+            language_bands[language_code],
+        )
+        word = db.execute(stmt.limit(1)).scalar_one_or_none()
+        if word is not None:
+            return word
+
+    # Fourth preference: any unranked or not-too-basic catalog word.
+    for language_code in language_codes:
+        stmt = _exclude_below_band_floor(
+            global_word_stmt(language_code),
+            language_bands[language_code],
+        )
+        word = db.execute(stmt.limit(1)).scalar_one_or_none()
+        if word is not None:
+            return word
+
+    # If the user has already touched every selected-language word, keep the
+    # ritual alive by revisiting the least-progressed word as the primary.
     progress_stmt = (
         select(UserWordProgress)
         .join(UserWordProgress.word)
         .options(joinedload(UserWordProgress.word))
         .where(UserWordProgress.user_id == user.id)
-        .where(Word.language_code == settings.target_language_code)
+        .where(Word.language_code.in_(language_codes))
         .order_by(
             UserWordProgress.progress_percent.asc(),
             UserWordProgress.last_seen_on.asc().nullsfirst(),
@@ -328,9 +362,28 @@ def _select_new_word(
     return progress.word if progress is not None else None
 
 
+def _rotated_language_codes(
+    language_codes: list[str],
+    user: VocabuildaryUser,
+    study_date: date,
+) -> list[str]:
+    if len(language_codes) <= 1:
+        return language_codes
+    offset = (study_date.toordinal() + int(user.id or 0)) % len(language_codes)
+    return [*language_codes[offset:], *language_codes[:offset]]
+
+
+def _exclude_below_band_floor(stmt, frequency_band):
+    if frequency_band is None or frequency_band.min_frequency_rank is None:
+        return stmt
+    return stmt.where(
+        (Word.frequency_rank.is_(None)) | (Word.frequency_rank >= frequency_band.min_frequency_rank)
+    )
+
+
 def _progress_review_query(
     user: VocabuildaryUser,
-    settings: UserLearningSettings,
+    language_code: str,
     excluded_word_ids: set[int],
 ):
     stmt = (
@@ -339,7 +392,7 @@ def _progress_review_query(
         .options(joinedload(UserWordProgress.word))
         .where(UserWordProgress.user_id == user.id)
         .where(UserWordProgress.status != "reset")
-        .where(Word.language_code == settings.target_language_code)
+        .where(Word.language_code == language_code)
     )
     if excluded_word_ids:
         stmt = stmt.where(UserWordProgress.word_id.not_in(excluded_word_ids))
@@ -350,6 +403,7 @@ def _select_review_progress(
     db: Session,
     user: VocabuildaryUser,
     settings: UserLearningSettings,
+    language_code: str,
     study_date: date,
     excluded_word_ids: set[int],
 ) -> list[UserWordProgress]:
@@ -358,7 +412,7 @@ def _select_review_progress(
         return []
 
     due_stmt = (
-        _progress_review_query(user, settings, excluded_word_ids)
+        _progress_review_query(user, language_code, excluded_word_ids)
         .where(UserWordProgress.next_due_on.is_not(None))
         .where(UserWordProgress.next_due_on <= study_date)
         .order_by(
@@ -375,7 +429,7 @@ def _select_review_progress(
     selected_ids = {progress.word_id for progress in selected}
     fill_excluded_ids = excluded_word_ids | selected_ids
     fill_stmt = (
-        _progress_review_query(user, settings, fill_excluded_ids)
+        _progress_review_query(user, language_code, fill_excluded_ids)
         .where(UserWordProgress.last_seen_on.is_not(None))
         .where(UserWordProgress.last_seen_on < study_date)
         .order_by(
@@ -393,6 +447,7 @@ def _get_previous_cloze_session(
     db: Session,
     user: VocabuildaryUser,
     study_date: date,
+    language_code: str | None = None,
 ) -> Optional[DailyLearningSession]:
     stmt = (
         select(DailyLearningSession)
@@ -406,6 +461,10 @@ def _get_previous_cloze_session(
         .order_by(DailyLearningSession.session_date.desc(), DailyLearningSession.id.desc())
         .limit(1)
     )
+    if language_code:
+        stmt = stmt.join(Word, DailyLearningSession.cloze_word_id == Word.id).where(
+            Word.language_code == language_code
+        )
     return db.execute(stmt).unique().scalar_one_or_none()
 
 
@@ -478,13 +537,19 @@ def build_daily_learning_plan(
     if existing is not None:
         return _hydrate_existing_plan(db, existing, settings)
 
-    new_word = _select_new_word(db, user, settings)
+    new_word = _select_new_word(db, user, settings, study_date)
     if new_word is None:
         logger.warning("No words available for user id=%s", user.id)
         return None
 
     _get_or_create_progress(db, user, new_word, study_date)
-    previous_session = _get_previous_cloze_session(db, user, study_date)
+    plan_language_code = new_word.language_code or settings.target_language_code
+    previous_session = _get_previous_cloze_session(
+        db,
+        user,
+        study_date,
+        language_code=plan_language_code,
+    )
     previous_cloze = _cloze_reveal_from_session(previous_session)
 
     excluded_word_ids = {new_word.id}
@@ -495,6 +560,7 @@ def build_daily_learning_plan(
         db,
         user,
         settings,
+        plan_language_code,
         study_date,
         excluded_word_ids,
     )
@@ -677,7 +743,7 @@ def _parse_word_id_list(value: object) -> list[int]:
 def _load_editable_review_words(
     db: Session,
     user: VocabuildaryUser,
-    settings: UserLearningSettings,
+    language_code: str,
     word_ids: list[int],
     excluded_word_ids: set[int],
 ) -> list[Word]:
@@ -694,7 +760,7 @@ def _load_editable_review_words(
             .where(UserWordProgress.word_id.not_in(excluded_word_ids))
             .where(UserWordProgress.status != "reset")
             .where(UserWordProgress.encounter_count > 0)
-            .where(Word.language_code == settings.target_language_code)
+            .where(Word.language_code == language_code)
         )
         .unique()
         .scalars()
@@ -726,6 +792,7 @@ def update_daily_learning_plan(
         raise LearningPlanLockedError("Today's plan has already been sent.")
 
     excluded_word_ids = {plan.new_word.id}
+    plan_language_code = plan.new_word.language_code
     cloze_word = plan.cloze_word
     context_words = list(plan.context_words)
 
@@ -734,7 +801,7 @@ def update_daily_learning_plan(
         cloze_words = _load_editable_review_words(
             db,
             user,
-            plan.settings,
+            plan_language_code,
             [cloze_word_id] if cloze_word_id is not None else [],
             excluded_word_ids,
         )
@@ -748,7 +815,7 @@ def update_daily_learning_plan(
         context_words = _load_editable_review_words(
             db,
             user,
-            plan.settings,
+            plan_language_code,
             context_word_ids,
             excluded_word_ids,
         )
@@ -1018,12 +1085,13 @@ def _send_user_notification(
     word: Word,
     session: DailyLearningSession | None,
     kind: str,
+    notifier: NotificationSender | None = None,
 ) -> tuple[bool, int]:
     """Deliver to the configured external provider and queue mobile notifications."""
     provider_sent = False
     if user.provider_configured:
-        notifier = create_notifier_for_user(user)
-        notifier.send_message(message_text, parse_mode="HTML")
+        provider_notifier = notifier or create_notifier_for_user(user)
+        provider_notifier.send_message(message_text, parse_mode="HTML")
         provider_sent = True
 
     mobile_count = queue_mobile_notifications_for_user(
@@ -1086,6 +1154,7 @@ def send_daily_word(
             word=plan.new_word,
             session=plan.session,
             kind="daily",
+            notifier=telegram,
         )
         logger.info(
             "Sent daily learning session to user id=%s provider=%s mobile=%s word=%r",

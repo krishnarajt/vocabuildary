@@ -285,6 +285,11 @@ class VocabuildaryUser(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    mobile_auth_tokens = relationship(
+        "MobileAuthToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     books = relationship("Book", back_populates="user")
     learning_settings = relationship(
         "UserLearningSettings",
@@ -412,6 +417,36 @@ class MobileDevice(Base):
         back_populates="device",
         cascade="all, delete-orphan",
     )
+
+
+class MobileAuthToken(Base):
+    """A hashed bearer token issued after gateway browser authentication."""
+
+    __tablename__ = "mobile_auth_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_mobile_auth_tokens_token_hash"),
+        {"schema": constants.DB_SCHEMA} if constants.DB_SCHEMA else {},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer,
+        ForeignKey(
+            f"{constants.DB_SCHEMA}.vocabuildary_users.id"
+            if constants.DB_SCHEMA
+            else "vocabuildary_users.id"
+        ),
+        nullable=False,
+    )
+    token_hash = Column(Text, nullable=False)
+    device_id = Column(Text, nullable=True)
+    label = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("VocabuildaryUser", back_populates="mobile_auth_tokens")
 
 
 class MobileNotification(Base):

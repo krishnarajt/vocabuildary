@@ -142,6 +142,7 @@ def update_user_settings(
     if isinstance(learning_payload, dict):
         settings = get_or_create_learning_settings(db, user)
         _update_learning_settings(settings, learning_payload)
+        _update_language_levels(db, user, learning_payload)
 
     user.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -185,6 +186,53 @@ def _normalize_intervals(value: Any) -> list[int] | None:
     return intervals or None
 
 
+def normalize_language_codes(value: Any, fallback: list[str] | None = None) -> list[str]:
+    """Normalize a user-editable list of learning languages."""
+    raw_values: list[Any]
+    if isinstance(value, str):
+        raw_values = value.split(",")
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = fallback or [constants.DEFAULT_TARGET_LANGUAGE_CODE]
+
+    language_codes: list[str] = []
+    for raw_value in raw_values:
+        for raw_part in str(raw_value or "").replace(";", ",").split(","):
+            language_code = raw_part.strip().lower()
+            if not language_code:
+                continue
+            if language_code not in language_codes:
+                language_codes.append(language_code)
+
+    return language_codes[:12] or (fallback or [constants.DEFAULT_TARGET_LANGUAGE_CODE])
+
+
+def learning_language_codes(settings: UserLearningSettings | None) -> list[str]:
+    if settings is None:
+        return [constants.DEFAULT_TARGET_LANGUAGE_CODE]
+    return normalize_language_codes(settings.target_language_code)
+
+
+def _update_language_levels(
+    db: Session,
+    user: VocabuildaryUser,
+    payload: dict[str, Any],
+) -> None:
+    raw_levels = payload.get("language_levels")
+    if not isinstance(raw_levels, dict):
+        return
+
+    from app.services.language_skill_service import CEFR_CODES, set_user_language_level
+
+    for raw_language_code, raw_level_code in raw_levels.items():
+        language_code = str(raw_language_code or "").strip().lower()
+        level_code = str(raw_level_code or "").strip().upper()
+        if not language_code or level_code not in CEFR_CODES:
+            continue
+        set_user_language_level(db, user, language_code, level_code, source="manual")
+
+
 def _update_learning_settings(
     settings: UserLearningSettings,
     payload: dict[str, Any],
@@ -194,9 +242,12 @@ def _update_learning_settings(
         settings.enabled = bool(payload.get("enabled"))
 
     if "target_language_code" in payload:
-        target_language_code = str(payload.get("target_language_code") or "").strip().lower()
-        if target_language_code:
-            settings.target_language_code = target_language_code
+        language_codes = normalize_language_codes(payload.get("target_language_code"))
+        settings.target_language_code = ",".join(language_codes)
+
+    if "target_language_codes" in payload:
+        language_codes = normalize_language_codes(payload.get("target_language_codes"))
+        settings.target_language_code = ",".join(language_codes)
 
     if "daily_review_words" in payload:
         value = _bounded_int(payload.get("daily_review_words"), minimum=0, maximum=12)
@@ -227,15 +278,18 @@ def serialize_learning_settings(settings: UserLearningSettings | None) -> dict[s
         return {
             "enabled": True,
             "target_language_code": constants.DEFAULT_TARGET_LANGUAGE_CODE,
+            "target_language_codes": [constants.DEFAULT_TARGET_LANGUAGE_CODE],
             "daily_review_words": constants.DEFAULT_DAILY_REVIEW_WORDS,
             "daily_cloze_words": constants.DEFAULT_DAILY_CLOZE_WORDS,
             "mastery_encounters": constants.DEFAULT_MASTERY_ENCOUNTERS,
             "review_intervals": list(constants.DEFAULT_REVIEW_INTERVAL_DAYS),
         }
 
+    language_codes = learning_language_codes(settings)
     return {
         "enabled": bool(settings.enabled),
-        "target_language_code": settings.target_language_code,
+        "target_language_code": language_codes[0],
+        "target_language_codes": language_codes,
         "daily_review_words": settings.daily_review_words,
         "daily_cloze_words": settings.daily_cloze_words,
         "mastery_encounters": settings.mastery_encounters,

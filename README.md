@@ -29,6 +29,32 @@ The old `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` env vars are now only a
 legacy fallback for scheduled sends before any user has configured Telegram in
 the UI.
 
+## Local Docker
+
+Run the local API and Next.js UI from this directory:
+
+```bash
+docker compose up --build
+```
+
+The compose stack uses SQLite at `/app/data/vocabuildary.sqlite3` inside the
+`vocabuildary_data` Docker volume and enables a local-only identity fallback so
+the UI can load without API Get Away or Authentik. Open the UI at:
+
+```text
+http://localhost:3001
+```
+
+Set `VOCABUILDARY_UI_PORT` if you want another host port, for example
+`VOCABUILDARY_UI_PORT=3010 docker compose up --build`.
+
+Anything with a real token, key, or password should live in an ignored env file
+such as `.env.docker.local`, then be passed explicitly:
+
+```bash
+docker compose --env-file .env.docker.local up --build
+```
+
 ## One-Sided Learning Schedule
 
 Daily sends are planned per user. The global `words` table stores dictionary

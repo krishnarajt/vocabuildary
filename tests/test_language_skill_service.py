@@ -9,7 +9,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("DB_SCHEMA", "")
 
 from app.db.database import Base
-from app.db.models import LanguageQuiz, UserLanguageLevel, VocabuildaryUser, Word
+from app.db.models import Book, BookWord, LanguageQuiz, UserLanguageLevel, VocabuildaryUser, Word
 from app.services.language_skill_service import (
     generate_language_quiz,
     get_language_quiz,
@@ -138,6 +138,80 @@ class LanguageSkillServiceTests(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.new_word.word, "anomaly")
+        db.close()
+
+    def test_daily_plan_prefers_in_band_book_words_over_basic_words(self):
+        db, user = self._seed_user()
+        db.add_all(
+            [
+                Word(
+                    language_code="en",
+                    word="the",
+                    meaning="basic article",
+                    example="The book opened.",
+                    frequency_rank=1,
+                ),
+                Word(
+                    language_code="en",
+                    word="resonant",
+                    meaning="deeply echoing or meaningful",
+                    example="The passage felt resonant.",
+                    frequency_rank=6000,
+                ),
+                Word(
+                    language_code="en",
+                    word="generic",
+                    meaning="not specific",
+                    example="The generic word was available.",
+                    frequency_rank=6001,
+                ),
+            ]
+        )
+        db.commit()
+        words_by_text = {word.word: word for word in db.query(Word).all()}
+        book = Book(
+            book_uuid="test-book",
+            user_id=user.id,
+            title="Test Book",
+            language_code="en",
+            original_filename="test.pdf",
+            file_extension="pdf",
+            source_bucket="books",
+            source_object_key="test.pdf",
+            status="processed",
+            learning_enabled=True,
+        )
+        db.add(book)
+        db.flush()
+        db.add_all(
+            [
+                BookWord(
+                    book_id=book.id,
+                    word_id=words_by_text["the"].id,
+                    user_id=user.id,
+                    language_code="en",
+                    source_text="the",
+                    occurrence_count=100,
+                    rank_in_book=1,
+                ),
+                BookWord(
+                    book_id=book.id,
+                    word_id=words_by_text["resonant"].id,
+                    user_id=user.id,
+                    language_code="en",
+                    source_text="resonant",
+                    occurrence_count=6,
+                    rank_in_book=2,
+                ),
+            ]
+        )
+        db.commit()
+        set_user_language_level(db, user, "en", "B2")
+
+        plan = build_daily_learning_plan(db, user, study_date=date(2026, 5, 2))
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.new_word.word, "resonant")
         db.close()
 
 

@@ -3,15 +3,17 @@ Entrypoint for the one-shot words.csv import Job.
 
 Run as: `python -m jobs.import_words`
 
-Equivalent to v1's import_words.py but on SQLAlchemy + Postgres. Uses
-ON CONFLICT DO NOTHING via SQLAlchemy dialect so re-running is safe.
+Equivalent to v1's import_words.py but on SQLAlchemy. Uses dialect-native
+upsert support where available so re-running is safe.
 """
 
 import csv
 import logging
 import sys
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.common import constants
 from app.common.logging_config import setup_logging
@@ -20,6 +22,37 @@ from app.db.models import Word
 
 
 logger = logging.getLogger(__name__)
+
+
+def _insert_word_if_missing(db, values: dict[str, object]) -> int:
+    dialect_name = db.bind.dialect.name if db.bind is not None else ""
+    if dialect_name == "postgresql":
+        result = db.execute(
+            pg_insert(Word)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["language_code", "word"])
+        )
+        return int(result.rowcount or 0)
+
+    if dialect_name == "sqlite":
+        result = db.execute(
+            sqlite_insert(Word)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["language_code", "word"])
+        )
+        return int(result.rowcount or 0)
+
+    existing_id = db.execute(
+        select(Word.id).where(
+            Word.language_code == values["language_code"],
+            Word.word == values["word"],
+        )
+    ).scalar_one_or_none()
+    if existing_id is not None:
+        return 0
+    db.add(Word(**values))
+    db.flush()
+    return 1
 
 
 def import_words_from_csv(csv_path: str) -> tuple[int, int]:
@@ -45,28 +78,26 @@ def import_words_from_csv(csv_path: str) -> tuple[int, int]:
                 if not word_value:
                     continue
 
-                stmt = (
-                    pg_insert(Word)
-                    .values(
-                        language_code=language_code,
-                        word=word_value,
-                        meaning=meaning_value,
-                        example=example_value,
-                        part_of_speech=(row.get("part_of_speech") or "").strip() or None,
-                        pronunciation=(row.get("pronunciation") or "").strip() or None,
-                        origin_language=(row.get("origin_language") or "").strip() or None,
-                        etymology=(row.get("etymology") or "").strip() or None,
-                        register=(row.get("register") or "").strip() or None,
-                        difficulty_level=int(row["difficulty_level"])
+                inserted = _insert_word_if_missing(
+                    db,
+                    {
+                        "language_code": language_code,
+                        "word": word_value,
+                        "meaning": meaning_value,
+                        "example": example_value,
+                        "part_of_speech": (row.get("part_of_speech") or "").strip() or None,
+                        "pronunciation": (row.get("pronunciation") or "").strip() or None,
+                        "origin_language": (row.get("origin_language") or "").strip() or None,
+                        "etymology": (row.get("etymology") or "").strip() or None,
+                        "register": (row.get("register") or "").strip() or None,
+                        "difficulty_level": int(row["difficulty_level"])
                         if (row.get("difficulty_level") or "").strip().isdigit()
                         else None,
-                        sent=False,
-                    )
-                    .on_conflict_do_nothing(index_elements=["language_code", "word"])
+                        "sent": False,
+                    },
                 )
-                result = db.execute(stmt)
                 # rowcount == 1 means we actually inserted; 0 means skipped
-                if result.rowcount == 1:
+                if inserted == 1:
                     added += 1
                 else:
                     skipped += 1

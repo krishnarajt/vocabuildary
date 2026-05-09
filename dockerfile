@@ -48,8 +48,9 @@ WORKDIR /app
 # Copy .venv + source from builder
 COPY --from=builder --chown=app:app /app /app
 
-# Logs directory — mounted at /app/logs in k8s if a PVC is wanted
-RUN mkdir -p /app/logs && chown -R app:app /app/logs
+# Writable local/runtime directories. /app/data is used by the SQLite Docker
+# stack; /app/logs can still be mounted in k8s if a PVC is wanted.
+RUN mkdir -p /app/logs /app/data && chown -R app:app /app/logs /app/data
 
 USER app
 

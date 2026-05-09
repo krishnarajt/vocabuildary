@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.common import constants
@@ -397,7 +398,6 @@ def _upsert_frequency_rows(rows: list[dict[str, Any]], language_code: str) -> tu
     if not rows:
         return 0, 0
 
-    rows = [_normalize_word_upsert_row(row) for row in rows]
     words = [row["word"] for row in rows]
     db = get_db_session()
     try:
@@ -409,7 +409,7 @@ def _upsert_frequency_rows(rows: list[dict[str, Any]], language_code: str) -> tu
                 )
             ).scalars()
         )
-        stmt = pg_insert(Word).values(rows)
+        stmt = _word_insert(db).values(rows)
         excluded = stmt.excluded
         stmt = stmt.on_conflict_do_update(
             index_elements=["language_code", "word"],
@@ -629,7 +629,6 @@ def _upsert_definition_rows(
     if not rows:
         return 0, 0, 0
 
-    rows = [_normalize_word_upsert_row(row) for row in rows]
     words = [row["word"] for row in rows]
     db = get_db_session()
     try:
@@ -649,7 +648,7 @@ def _upsert_definition_rows(
             db.rollback()
             return 0, 0, skipped
 
-        stmt = pg_insert(Word).values(rows)
+        stmt = _word_insert(db).values(rows)
         excluded = stmt.excluded
         stmt = stmt.on_conflict_do_update(
             index_elements=["language_code", "word"],
@@ -695,10 +694,7 @@ def _fill_if_empty(existing_col: Any, excluded_col: Any) -> Any:
     )
 
 
-def _normalize_word_upsert_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Map external payload keys to ORM attribute names for Word upserts."""
-    if "metadata" not in row or "word_metadata" in row:
-        return row
-    normalized = dict(row)
-    normalized["word_metadata"] = normalized.pop("metadata")
-    return normalized
+def _word_insert(db: Session):
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        return sqlite_insert(Word)
+    return pg_insert(Word)

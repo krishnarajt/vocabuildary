@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from app.common import constants
+
 
 class AuthenticationRequiredError(RuntimeError):
     """Raised when a request does not include gateway-injected identity."""
@@ -85,6 +87,19 @@ def extract_gateway_identity(headers: Mapping[str, str]) -> GatewayIdentity:
 
     identity_key = sub or email
     if not identity_key:
+        if constants.LOCAL_DEV_AUTH_ENABLED:
+            raw_headers = {
+                "x-user-sub": constants.LOCAL_DEV_USER_SUB,
+                "x-user-email": constants.LOCAL_DEV_USER_EMAIL,
+                "x-user-name": constants.LOCAL_DEV_USER_NAME,
+            }
+            return GatewayIdentity(
+                identity_key=constants.LOCAL_DEV_USER_SUB,
+                sub=constants.LOCAL_DEV_USER_SUB,
+                email=constants.LOCAL_DEV_USER_EMAIL,
+                name=constants.LOCAL_DEV_USER_NAME,
+                raw_headers=raw_headers,
+            )
         raise AuthenticationRequiredError("Authenticated gateway user headers are required.")
 
     return GatewayIdentity(

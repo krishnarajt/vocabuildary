@@ -12,7 +12,6 @@ change in Vault, no code edits required.
 """
 
 import asyncio
-import logging
 import signal
 import sys
 

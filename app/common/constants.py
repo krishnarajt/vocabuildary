@@ -24,6 +24,17 @@ def _get_required(name: str) -> str:
     return value
 
 
+def _get_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_csv(name: str, default: str = "") -> list[str]:
+    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
 # ===== App =====
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_DIR: str = os.getenv("LOG_DIR", "/app/logs")
@@ -36,10 +47,30 @@ REMINDER_SLOT_POLL_SECONDS: int = int(os.getenv("REMINDER_SLOT_POLL_SECONDS", "6
 
 # ===== Database =====
 # A fully-formed URL lives in Vault and is injected via the External Secret.
-# Example value:
-#   postgresql+psycopg://vocabuildary:<pw>@postgres-host:5432/vocabuildary
 DATABASE_URL: str = _get_required("DATABASE_URL")
-DB_SCHEMA: str = os.getenv("DB_SCHEMA", "vocabuildary")
+DB_SCHEMA: str = os.getenv(
+    "DB_SCHEMA",
+    "" if DATABASE_URL.startswith("sqlite") else "vocabuildary",
+)
+
+# ===== Local Docker/dev escape hatch =====
+# Keep this off in deployed environments. It lets a local UI talk directly to
+# the API without API Get Away injecting identity headers.
+LOCAL_DEV_AUTH_ENABLED: bool = _get_bool("LOCAL_DEV_AUTH_ENABLED", False)
+LOCAL_DEV_USER_SUB: str = os.getenv("LOCAL_DEV_USER_SUB", "local-dev-user")
+LOCAL_DEV_USER_EMAIL: str = os.getenv("LOCAL_DEV_USER_EMAIL", "local@vocabuildary.dev")
+LOCAL_DEV_USER_NAME: str = os.getenv("LOCAL_DEV_USER_NAME", "Local Vocabuildary")
+LOCAL_DEV_CORS_ORIGINS: list[str] = _get_csv("LOCAL_DEV_CORS_ORIGINS")
+
+# ===== Native mobile auth =====
+# Mobile apps authenticate through API Get Away in a browser, then receive a
+# Vocabuildary token through a custom-scheme redirect. The app never needs to
+# know about the underlying SSO provider or OIDC client settings.
+MOBILE_AUTH_TOKEN_TTL_DAYS: int = int(os.getenv("MOBILE_AUTH_TOKEN_TTL_DAYS", "365"))
+MOBILE_AUTH_REDIRECT_SCHEMES: list[str] = _get_csv(
+    "MOBILE_AUTH_REDIRECT_SCHEMES",
+    "com.kptgames.vocabuildary",
+)
 
 # ===== Telegram =====
 # Legacy fallback only. New installs store Telegram destination settings per
@@ -59,8 +90,8 @@ APPRISE_NOTIFICATION_TITLE: str = os.getenv("APPRISE_NOTIFICATION_TITLE", "Vocab
 # Just Like Clockwork backend so both apps can share the same deployment
 # convention while using different buckets/prefixes.
 MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "")
 MINIO_BUCKET: str = os.getenv("MINIO_BUCKET", "vocabuildary-books")
 MINIO_REGION: str = os.getenv("MINIO_REGION", "us-east-1")
 

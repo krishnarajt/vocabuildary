@@ -9,7 +9,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from app.common import constants
 from app.db.database import get_db_session
@@ -56,6 +56,12 @@ from app.services.mobile_notification_service import (
     register_mobile_device,
     serialize_mobile_device,
     serialize_mobile_notification,
+)
+from app.services.mobile_auth_service import (
+    bearer_token_from_headers,
+    issue_mobile_auth_token,
+    revoke_mobile_auth_token,
+    user_for_mobile_auth_token,
 )
 from app.services.dictionary_import_service import (
     ImportValidationError,
@@ -755,6 +761,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/imports":
             self._handle_imports(parsed.query)
             return
+        if path == "/mobile/auth/start":
+            self._handle_mobile_auth_start(parsed.query)
+            return
         if path == "/mobile/devices":
             self._handle_mobile_devices()
             return
@@ -811,6 +820,9 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         if path == "/mobile/notifications/sync-due":
             self._handle_sync_due_mobile_notifications()
             return
+        if path == "/mobile/auth/logout":
+            self._handle_mobile_auth_logout()
+            return
         if path.startswith("/mobile/notifications/") and path.endswith("/delivered"):
             self._handle_mobile_notification_delivered(path)
             return
@@ -841,9 +853,11 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
-        self.send_header("Access-Control-Allow-Credentials", "true")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_cors_headers()
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            self.headers.get("Access-Control-Request-Headers", "Content-Type"),
+        )
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
         self.end_headers()
 
@@ -1298,6 +1312,62 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             logger.error("Failed to fetch imports: %s", exc, exc_info=True)
             self._send_json(
                 {"error": "Failed to fetch imports."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_auth_start(self, query: str) -> None:
+        try:
+            params = parse_qs(query)
+            redirect_uri = self._validated_mobile_redirect_uri(
+                params.get("redirect_uri", [None])[0]
+            )
+            device_id = (params.get("device_id", [""])[0] or "").strip() or None
+            label = (params.get("label", ["Android"])[0] or "Android").strip()
+            wants_json = (params.get("format", [""])[0] or "").lower() == "json"
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            with self._db_session() as db:
+                user = self._gateway_user(db)
+                token = issue_mobile_auth_token(
+                    db,
+                    user,
+                    device_id=device_id,
+                    label=label,
+                )
+                if wants_json:
+                    self._send_json(
+                        {
+                            "token": token,
+                            "token_type": "Bearer",
+                            "user": serialize_user(user),
+                        }
+                    )
+                    return
+                self._send_redirect(
+                    self._mobile_redirect_with_token(redirect_uri, token)
+                )
+        except AuthenticationRequiredError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            logger.error("Failed to start mobile auth: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to start mobile auth."},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_mobile_auth_logout(self) -> None:
+        try:
+            token = bearer_token_from_headers(dict(self.headers.items()))
+            with self._db_session() as db:
+                revoked = revoke_mobile_auth_token(db, token)
+                self._send_json({"revoked": revoked})
+        except Exception as exc:
+            logger.error("Failed to revoke mobile auth token: %s", exc, exc_info=True)
+            self._send_json(
+                {"error": "Failed to revoke mobile auth token."},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -1760,13 +1830,41 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _current_user(self, db):
+        token = bearer_token_from_headers(dict(self.headers.items()))
+        token_user = user_for_mobile_auth_token(db, token)
+        if token_user is not None:
+            return token_user
+        return self._gateway_user(db)
+
+    def _gateway_user(self, db):
         identity = extract_gateway_identity(dict(self.headers.items()))
         return get_or_create_user(db, identity)
+
+    @staticmethod
+    def _validated_mobile_redirect_uri(raw_redirect_uri: str | None) -> str:
+        allowed_schemes = constants.MOBILE_AUTH_REDIRECT_SCHEMES
+        default_scheme = allowed_schemes[0] if allowed_schemes else "com.kptgames.vocabuildary"
+        redirect_uri = (raw_redirect_uri or f"{default_scheme}://auth").strip()
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme not in allowed_schemes:
+            raise ValueError("Mobile redirect URI scheme is not allowed.")
+        return redirect_uri
+
+    @staticmethod
+    def _mobile_redirect_with_token(redirect_uri: str, token: str) -> str:
+        parsed = urlparse(redirect_uri)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        query.extend([("token", token), ("token_type", "Bearer")])
+        return urlunparse(parsed._replace(query=urlencode(query)))
 
     @staticmethod
     def _service_path(path: str) -> str:
         if path == "/api":
             return "/"
+        if path in ("/api/vocabuildary", "/api/vocabuildary/"):
+            return "/"
+        if path.startswith("/api/vocabuildary/"):
+            return path[len("/api/vocabuildary"):]
         if path.startswith("/api/"):
             return path[4:]
         return path
@@ -1847,6 +1945,7 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -1855,8 +1954,27 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send_cors_headers(self) -> None:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return
+        allowed_origins = constants.LOCAL_DEV_CORS_ORIGINS
+        if "*" not in allowed_origins and origin not in allowed_origins:
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Vary", "Origin")
 
 
 class UIServer:
