@@ -148,8 +148,6 @@ def update_reminder_slots_for_user(
         if slot is None:
             slot = UserReminderSlot(user_id=user.id)
             db.add(slot)
-            db.flush()
-            keep_ids.add(slot.id)
 
         slot.label = str(raw_slot.get("label") or "").strip() or None
         slot.time_of_day = time_of_day
