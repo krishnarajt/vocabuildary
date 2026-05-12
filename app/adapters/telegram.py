@@ -15,6 +15,10 @@ from app.common import constants
 logger = logging.getLogger(__name__)
 
 
+class NotificationDeliveryError(RuntimeError):
+    """Raised when an upstream notification provider cannot be reached."""
+
+
 class TelegramAdapter:
     """Minimal Telegram Bot API client."""
 
@@ -49,9 +53,14 @@ class TelegramAdapter:
             "disable_web_page_preview": disable_web_page_preview,
         }
         logger.debug(f"POST {url} chat_id={self.chat_id}")
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(url, json=payload)
-        response.raise_for_status()
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise NotificationDeliveryError(
+                "Telegram delivery failed due to an upstream network error."
+            ) from exc
         data = response.json()
         if not data.get("ok"):
             # Telegram returns 200 even on logical failures sometimes

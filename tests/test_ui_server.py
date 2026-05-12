@@ -1,10 +1,12 @@
 import os
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("DB_SCHEMA", "")
 
+from app.adapters.telegram import NotificationDeliveryError
 from app.ui.server import _UIRequestHandler
 
 
@@ -52,6 +54,43 @@ class UIServicePathTests(unittest.TestCase):
         )
 
         self.assertTrue(handler.close_connection)
+
+    def test_test_trigger_returns_bad_gateway_for_notification_delivery_error(self):
+        handler = _UIRequestHandler.__new__(_UIRequestHandler)
+        handler.path = "/test-trigger"
+        responses = []
+
+        class _DbContext:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        handler._db_session = lambda: _DbContext()
+        handler._current_user = lambda db: type(
+            "User",
+            (),
+            {
+                "id": 7,
+                "notification_provider": "telegram",
+                "notifications_configured": True,
+            },
+        )()
+        handler._send_json = lambda payload, status=200: responses.append((status, payload))
+
+        with patch(
+            "app.ui.server.send_test_notification",
+            side_effect=NotificationDeliveryError("Telegram delivery failed due to an upstream network error."),
+        ):
+            handler._handle_test_trigger()
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0][0], 502)
+        self.assertEqual(
+            responses[0][1],
+            {"error": "Telegram delivery failed due to an upstream network error."},
+        )
 
 
 class _BrokenWriter(BytesIO):

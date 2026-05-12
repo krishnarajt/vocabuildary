@@ -58,6 +58,7 @@ from app.services.mobile_notification_service import (
     serialize_mobile_device,
     serialize_mobile_notification,
 )
+from app.adapters.telegram import NotificationDeliveryError
 from app.services.mobile_auth_service import (
     bearer_token_from_headers,
     issue_mobile_auth_token,
@@ -467,6 +468,20 @@ HTML_PAGE = """<!DOCTYPE html>
           <li class="empty">Loading...</li>
         </ul>
       </section>
+
+      <section class="card">
+        <p class="eyebrow">Dictionary Pipeline</p>
+        <h2>Imports</h2>
+        <p class="hint">Use the default chunked Kaikki import or run the whole source in one pass.</p>
+        <div class="actions">
+          <button type="button" class="secondary" id="kaikki-trigger">Import Kaikki Chunk</button>
+          <button type="button" id="kaikki-all-trigger">Import Kaikki All</button>
+        </div>
+        <p class="status" id="imports-status">Loading import status...</p>
+        <ul id="imports-list">
+          <li class="empty">Loading...</li>
+        </ul>
+      </section>
     </section>
   </main>
 
@@ -475,8 +490,12 @@ HTML_PAGE = """<!DOCTYPE html>
     const status = document.getElementById("status");
     const list = document.getElementById("recent-list");
     const progressList = document.getElementById("progress-list");
+    const importsList = document.getElementById("imports-list");
+    const importsStatus = document.getElementById("imports-status");
     const testButton = document.getElementById("test-trigger");
     const refreshButton = document.getElementById("refresh-trigger");
+    const kaikkiButton = document.getElementById("kaikki-trigger");
+    const kaikkiAllButton = document.getElementById("kaikki-all-trigger");
     const form = document.getElementById("settings-form");
     const provider = document.getElementById("provider");
     const botToken = document.getElementById("bot-token");
@@ -548,6 +567,42 @@ HTML_PAGE = """<!DOCTYPE html>
       `).join("");
     }
 
+    function renderImports(items, stats = {}) {
+      const activeRun = items.find((item) => item.status === "queued" || item.status === "running");
+      kaikkiButton.disabled = Boolean(activeRun);
+      kaikkiAllButton.disabled = Boolean(activeRun);
+      const totalWords = Number(stats.total_words || 0).toLocaleString();
+      const definedWords = Number(stats.defined_words || 0).toLocaleString();
+      importsStatus.textContent = activeRun
+        ? `Import ${activeRun.status}: ${activeRun.source} ${Math.round(Number(activeRun.progress_percent || 0))}%`
+        : `Catalog: ${totalWords} words, ${definedWords} with meanings.`;
+
+      if (!items.length) {
+        importsList.innerHTML = '<li class="empty">No imports have run yet.</li>';
+        return;
+      }
+
+      importsList.innerHTML = items.slice(0, 5).map((item) => {
+        const scope = item.source === "kaikki" && Number(item.chunk_count || 0) === 1
+          ? "all"
+          : item.chunk_index && item.chunk_count
+            ? `chunk ${item.chunk_index}/${item.chunk_count}`
+            : "default";
+        const detail = `${item.source} ${scope} • ${item.language_code} • ${item.status}`;
+        const counts = `${Number(item.processed_items || 0).toLocaleString()} processed • ${Math.round(Number(item.progress_percent || 0))}%`;
+        return `
+          <li>
+            <span class="idx">${escapeHtml(String(item.id).padStart(2, "0"))}</span>
+            <span class="progress-meta">
+              <span class="word">${escapeHtml(detail)}</span>
+              <span class="meaning">${escapeHtml(counts)}</span>
+            </span>
+            <span class="time">${escapeHtml(formatDate(item.updated_at || item.created_at || ""))}</span>
+          </li>
+        `;
+      }).join("");
+    }
+
     function renderUser(payload) {
       const user = payload.user;
       const name = user.name || user.email || user.gateway_sub || "Signed in";
@@ -594,6 +649,16 @@ HTML_PAGE = """<!DOCTYPE html>
         renderProgress(data.items || []);
       } catch (error) {
         progressList.innerHTML = `<li class="empty">${error.message}</li>`;
+      }
+    }
+
+    async function loadImports() {
+      try {
+        const data = await apiFetch("/imports?limit=10");
+        renderImports(data.items || [], data.stats || {});
+      } catch (error) {
+        importsStatus.textContent = error.message;
+        importsList.innerHTML = `<li class="empty">${error.message}</li>`;
       }
     }
 
@@ -655,10 +720,46 @@ HTML_PAGE = """<!DOCTYPE html>
 
     refreshButton.addEventListener("click", async () => {
       status.textContent = "Refreshing...";
-      await Promise.all([loadMe(), loadRecent(), loadProgress()]).catch((error) => {
+      await Promise.all([loadMe(), loadRecent(), loadProgress(), loadImports()]).catch((error) => {
         status.textContent = error.message;
       });
       if (status.textContent === "Refreshing...") status.textContent = "Ready.";
+    });
+
+    kaikkiButton.addEventListener("click", async () => {
+      kaikkiButton.disabled = true;
+      kaikkiAllButton.disabled = true;
+      importsStatus.textContent = "Starting Kaikki chunk import...";
+      try {
+        const data = await apiFetch("/imports/kaikki", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        importsStatus.textContent = data.message || "Kaikki chunk import started.";
+      } catch (error) {
+        importsStatus.textContent = error.message;
+      } finally {
+        await loadImports();
+      }
+    });
+
+    kaikkiAllButton.addEventListener("click", async () => {
+      kaikkiButton.disabled = true;
+      kaikkiAllButton.disabled = true;
+      importsStatus.textContent = "Starting full Kaikki import...";
+      try {
+        const data = await apiFetch("/imports/kaikki", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunk_count: 1, chunk_index: 1 }),
+        });
+        importsStatus.textContent = data.message || "Full Kaikki import started.";
+      } catch (error) {
+        importsStatus.textContent = error.message;
+      } finally {
+        await loadImports();
+      }
     });
 
     progressList.addEventListener("click", async (event) => {
@@ -684,6 +785,7 @@ HTML_PAGE = """<!DOCTYPE html>
         await loadMe();
         await loadRecent();
         await loadProgress();
+        await loadImports();
         status.textContent = "Ready.";
       } catch (error) {
         userPill.textContent = "Sign in required";
@@ -1835,6 +1937,8 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
                 )
         except AuthenticationRequiredError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except NotificationDeliveryError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
         except Exception as exc:
             logger.error("Failed to send test notification: %s", exc, exc_info=True)
             self._send_json(
