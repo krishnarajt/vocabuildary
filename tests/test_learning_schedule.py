@@ -251,6 +251,13 @@ class LearningScheduleTests(unittest.TestCase):
                     example="The anomaly stood out.",
                     frequency_rank=3000,
                 ),
+                Word(
+                    language_code="en",
+                    word="zephyr",
+                    meaning="a light breeze",
+                    example="The zephyr was gentle.",
+                    frequency_rank=5000,
+                ),
             ]
         )
         db.commit()
@@ -275,13 +282,24 @@ class LearningScheduleTests(unittest.TestCase):
         with patch("app.services.word_service._learning_today", return_value=date(2026, 5, 10)):
             with patch("app.services.word_service.render_reminder_message", return_value=rendered):
                 success, word = send_test_notification(db=db, telegram=telegram, user=user)
+                second_success, second_word = send_test_notification(
+                    db=db,
+                    telegram=telegram,
+                    user=user,
+                )
 
         self.assertTrue(success)
+        self.assertTrue(second_success)
         self.assertIsNotNone(word)
+        self.assertIsNotNone(second_word)
         self.assertEqual(word.word, "anomaly")
-        self.assertEqual(telegram.messages, [("lesson", "HTML")])
+        self.assertEqual(second_word.word, "zephyr")
+        self.assertEqual(telegram.messages, [("lesson", "HTML"), ("lesson", "HTML")])
         self.assertEqual(db.query(UserWordProgress).count(), 0)
-        self.assertEqual(db.query(Word).count(), 2)
+        persisted_preview = build_daily_learning_plan(db, user, study_date=date(2026, 5, 10))
+        self.assertIsNotNone(persisted_preview)
+        self.assertEqual(persisted_preview.new_word.word, "zephyr")
+        self.assertEqual(db.query(Word).count(), 3)
         db.close()
 
 

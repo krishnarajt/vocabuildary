@@ -254,7 +254,9 @@ def _select_new_word(
     user: VocabuildaryUser,
     settings: UserLearningSettings,
     study_date: date,
+    excluded_word_ids: set[int] | None = None,
 ) -> Optional[Word]:
+    excluded_word_ids = set(excluded_word_ids or ())
     seen_word_ids = select(UserWordProgress.word_id).where(UserWordProgress.user_id == user.id)
     language_codes = _rotated_language_codes(learning_language_codes(settings), user, study_date)
 
@@ -275,7 +277,7 @@ def _select_new_word(
         return stmt
 
     def book_word_stmt(language_code: str):
-        return (
+        stmt = (
             select(Word)
             .join(BookWord, BookWord.word_id == Word.id)
             .join(Book, Book.id == BookWord.book_id)
@@ -289,14 +291,20 @@ def _select_new_word(
                 Word.word.asc(),
             )
         )
+        if excluded_word_ids:
+            stmt = stmt.where(Word.id.not_in(excluded_word_ids))
+        return stmt
 
     def global_word_stmt(language_code: str):
-        return (
+        stmt = (
             select(Word)
             .where(Word.language_code == language_code)
             .where(Word.id.not_in(seen_word_ids))
             .order_by(Word.frequency_rank.asc().nullslast(), func.random())
         )
+        if excluded_word_ids:
+            stmt = stmt.where(Word.id.not_in(excluded_word_ids))
+        return stmt
 
     # First preference: words from the user's enabled books that fit their
     # selected skill band for the language. This keeps book vocabulary ahead of
@@ -358,6 +366,8 @@ def _select_new_word(
         )
         .limit(1)
     )
+    if excluded_word_ids:
+        progress_stmt = progress_stmt.where(UserWordProgress.word_id.not_in(excluded_word_ids))
     progress = db.execute(progress_stmt).unique().scalar_one_or_none()
     return progress.word if progress is not None else None
 
@@ -510,6 +520,8 @@ def build_daily_learning_plan(
     db: Session,
     user: VocabuildaryUser,
     study_date: date | None = None,
+    excluded_new_word_ids: set[int] | None = None,
+    reserve_new_word: bool = True,
 ) -> Optional[DailyLearningPlan]:
     """
     Create or return today's user-specific learning plan.
@@ -537,12 +549,19 @@ def build_daily_learning_plan(
     if existing is not None:
         return _hydrate_existing_plan(db, existing, settings)
 
-    new_word = _select_new_word(db, user, settings, study_date)
+    new_word = _select_new_word(
+        db,
+        user,
+        settings,
+        study_date,
+        excluded_word_ids=excluded_new_word_ids,
+    )
     if new_word is None:
         logger.warning("No words available for user id=%s", user.id)
         return None
 
-    _get_or_create_progress(db, user, new_word, study_date)
+    if reserve_new_word:
+        _get_or_create_progress(db, user, new_word, study_date)
     plan_language_code = new_word.language_code or settings.target_language_code
     previous_session = _get_previous_cloze_session(
         db,
@@ -732,12 +751,46 @@ def _build_test_learning_plan(
         .limit(1)
     ).scalar_one_or_none()
 
+    excluded_word_ids: list[int] = []
     if existing is not None and existing.sent_at is None:
+        generated_content = existing.generated_content if isinstance(existing.generated_content, dict) else {}
+        prior_test_ids = generated_content.get("test_new_word_ids")
+        if isinstance(prior_test_ids, list):
+            for raw_word_id in prior_test_ids:
+                try:
+                    word_id = int(raw_word_id)
+                except (TypeError, ValueError):
+                    continue
+                if word_id > 0 and word_id not in excluded_word_ids:
+                    excluded_word_ids.append(word_id)
+        if existing.new_word_id and existing.new_word_id not in excluded_word_ids:
+            excluded_word_ids.append(existing.new_word_id)
         _drop_unsent_preview_progress(db, user, existing)
         db.delete(existing)
         db.flush()
 
-    return build_daily_learning_plan(db, user, study_date=study_date)
+    plan = build_daily_learning_plan(
+        db,
+        user,
+        study_date=study_date,
+        excluded_new_word_ids=set(excluded_word_ids),
+        reserve_new_word=False,
+    )
+    if plan is None and excluded_word_ids:
+        plan = build_daily_learning_plan(
+            db,
+            user,
+            study_date=study_date,
+            reserve_new_word=False,
+        )
+    if plan is None:
+        return None
+
+    generated_content = dict(plan.session.generated_content or {})
+    generated_content["test_new_word_ids"] = [*excluded_word_ids, plan.new_word.id]
+    plan.session.generated_content = generated_content
+    db.flush()
+    return plan
 
 
 def _parse_optional_word_id(value: object) -> int | None:
@@ -1215,7 +1268,7 @@ def send_test_notification(
     user: Optional[VocabuildaryUser] = None,
 ) -> Tuple[bool, Optional[Word]]:
     """
-    Send the same style of reminder as a real send, but without mutating state.
+    Send the same style of reminder as a real send without advancing progress.
     """
     owns_session = db is None
     db = db or get_db_session()
@@ -1263,7 +1316,6 @@ def send_test_notification(
             )
         else:
             word = plan.new_word
-            db.rollback()
             queue_mobile_notifications_for_user(
                 db,
                 user,
@@ -1274,16 +1326,17 @@ def send_test_notification(
                 session=None,
                 kind="test",
             )
-            db.commit()
             logger.info(
                 "User test notification queued for mobile only: user_id=%s word=%r",
                 user.id,
                 word.word,
             )
-        logger.info("Sent test notification for %r without mutating state", plan.new_word.word)
-        if user.provider_configured:
-            db.rollback()
+        logger.info("Sent test notification for %r without advancing progress", plan.new_word.word)
+        db.commit()
         return True, plan.new_word
+    except Exception:
+        db.rollback()
+        raise
     finally:
         if owns_session:
             db.close()
