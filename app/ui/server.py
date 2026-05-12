@@ -1804,6 +1804,13 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
         try:
             with self._db_session() as db:
                 user = self._current_user(db)
+                logger.info(
+                    "Received test trigger request: user_id=%s provider=%s notifications_configured=%s path=%s",
+                    getattr(user, "id", None),
+                    getattr(user, "notification_provider", None),
+                    getattr(user, "notifications_configured", None),
+                    self.path,
+                )
                 if not user.notifications_configured:
                     self._send_json(
                         {"error": "Configure a notification provider first."},
@@ -1820,6 +1827,11 @@ class _UIRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(
                     {"message": f"Test notification sent for {word.word}."}
+                )
+                logger.info(
+                    "Completed test trigger request: user_id=%s word=%r",
+                    getattr(user, "id", None),
+                    word.word,
                 )
         except AuthenticationRequiredError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)

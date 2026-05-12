@@ -12,6 +12,7 @@ messages list used by the app and translates it to the gateway payload.
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -30,7 +31,7 @@ class LLMGatewayAdapter:
         api_key: Optional[str] = None,
         default_model: Optional[str] = None,
         chat_path: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
     ) -> None:
         self.base_url = (constants.LLM_GATEWAY_URL if base_url is None else base_url).rstrip("/")
         self.api_key = constants.LLM_GATEWAY_API_KEY if api_key is None else api_key
@@ -38,7 +39,16 @@ class LLMGatewayAdapter:
             constants.LLM_GATEWAY_DEFAULT_MODEL if default_model is None else default_model
         )
         self.chat_path = constants.LLM_GATEWAY_CHAT_PATH if chat_path is None else chat_path
-        self.timeout = timeout
+        resolved_timeout = (
+            constants.LLM_GATEWAY_TIMEOUT_SECONDS if timeout is None else float(timeout)
+        )
+        self.timeout = httpx.Timeout(
+            resolved_timeout,
+            connect=constants.LLM_GATEWAY_CONNECT_TIMEOUT_SECONDS,
+            read=resolved_timeout,
+            write=constants.LLM_GATEWAY_WRITE_TIMEOUT_SECONDS,
+            pool=constants.LLM_GATEWAY_POOL_TIMEOUT_SECONDS,
+        )
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -117,16 +127,54 @@ class LLMGatewayAdapter:
         if kwargs:
             config["extra"] = kwargs
 
-        logger.debug(f"POST {url} model={config['model']}")
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(url, json=payload, headers=self._headers())
+        request_started = time.perf_counter()
+        logger.info(
+            "LLM gateway chat start: url=%s model=%s timeout=%.1fs system_chars=%s user_chars=%s has_image=%s extra_keys=%s",
+            url,
+            config["model"],
+            self.timeout.read,
+            len(system_prompt or ""),
+            len(user_prompt),
+            bool(image_base64),
+            sorted(config.get("extra", {}).keys()),
+        )
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(url, json=payload, headers=self._headers())
+        except Exception:
+            elapsed = time.perf_counter() - request_started
+            logger.exception(
+                "LLM gateway chat failed after %.2fs: url=%s model=%s",
+                elapsed,
+                url,
+                config["model"],
+            )
+            raise
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = response.text[:500]
+            elapsed = time.perf_counter() - request_started
+            logger.error(
+                "LLM gateway chat returned HTTP %s after %.2fs: url=%s model=%s body_preview=%r",
+                response.status_code,
+                elapsed,
+                url,
+                config["model"],
+                detail,
+            )
             raise RuntimeError(
                 f"LLM Gateway request failed with {response.status_code}: {detail}"
             ) from exc
+        elapsed = time.perf_counter() - request_started
+        logger.info(
+            "LLM gateway chat success after %.2fs: url=%s model=%s status=%s response_chars=%s",
+            elapsed,
+            url,
+            config["model"],
+            response.status_code,
+            len(response.text or ""),
+        )
         return response.json()
 
     def health(self) -> bool:

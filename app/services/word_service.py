@@ -1222,18 +1222,23 @@ def send_test_notification(
 
     try:
         if user is None:
+            logger.info("Sending legacy test notification without user context")
             notifier = telegram or create_legacy_notifier()
             word = get_random_unsent_word(db)
             if word is None:
+                logger.warning("Legacy test notification found no unsent word")
                 return False, None
             message = build_reminder_message(word)
             notifier.send_message(message, parse_mode="HTML")
             db.rollback()
+            logger.info("Legacy test notification sent for word=%r", word.word)
             return True, word
 
+        logger.info("Sending user test notification: user_id=%s", user.id)
         plan = _build_test_learning_plan(db, user)
         if plan is None:
             db.rollback()
+            logger.warning("User test notification found no plan: user_id=%s", user.id)
             return False, None
 
         rendered = render_reminder_message(
@@ -1242,9 +1247,20 @@ def send_test_notification(
             cloze_word=plan.cloze_word,
             previous_cloze=plan.previous_cloze,
         )
+        logger.info(
+            "User test notification rendered: user_id=%s word=%r provider_configured=%s",
+            user.id,
+            plan.new_word.word,
+            user.provider_configured,
+        )
         if user.provider_configured:
             notifier = telegram or create_notifier_for_user(user)
             notifier.send_message(rendered.message, parse_mode="HTML")
+            logger.info(
+                "User test notification delivered to provider: user_id=%s word=%r",
+                user.id,
+                plan.new_word.word,
+            )
         else:
             word = plan.new_word
             db.rollback()
@@ -1259,6 +1275,11 @@ def send_test_notification(
                 kind="test",
             )
             db.commit()
+            logger.info(
+                "User test notification queued for mobile only: user_id=%s word=%r",
+                user.id,
+                word.word,
+            )
         logger.info("Sent test notification for %r without mutating state", plan.new_word.word)
         if user.provider_configured:
             db.rollback()

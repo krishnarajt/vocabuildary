@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from html import escape
 from typing import Optional, Sequence
@@ -115,6 +116,14 @@ def generate_reminder_content(
     """
     llm = llm or LLMGatewayAdapter()
     context_words = list(context_words or [])
+    logger.info(
+        "Generating reminder content: word=%r language=%s context_words=%s cloze_word=%s llm_model=%s",
+        word.word,
+        word.language_code,
+        len(context_words),
+        cloze_word.word if cloze_word is not None else None,
+        getattr(llm, "default_model", None),
+    )
     cloze_target = (
         f"Word: {cloze_word.word}\n"
         f"Meaning: {cloze_word.meaning}\n"
@@ -187,6 +196,16 @@ def render_reminder_message(
     Falls back to deterministic content if generation fails, so reminders still
     go out even if the gateway is unavailable.
     """
+    started = time.perf_counter()
+    logger.info(
+        "Rendering reminder message start: word=%r language=%s context_words=%s cloze_word=%s has_previous_cloze=%s",
+        word.word,
+        word.language_code,
+        len(list(context_words or [])),
+        cloze_word.word if cloze_word is not None else None,
+        previous_cloze is not None,
+    )
+    used_fallback = False
     try:
         content = generate_reminder_content(
             word,
@@ -194,9 +213,24 @@ def render_reminder_message(
             cloze_word=cloze_word,
             llm=llm,
         )
+        logger.info(
+            "Rendered reminder content via LLM after %.2fs: word=%r paragraph_chars=%s history_chars=%s etymology_chars=%s cloze_chars=%s",
+            time.perf_counter() - started,
+            word.word,
+            len(content.paragraph),
+            len(content.history),
+            len(content.etymology),
+            len(content.cloze_prompt),
+        )
     except Exception as exc:
-        logger.warning("Falling back to static reminder content for %r: %s", word.word, exc)
+        logger.warning(
+            "Falling back to static reminder content for %r after %.2fs: %s",
+            word.word,
+            time.perf_counter() - started,
+            exc,
+        )
         content = _fallback_content(word, cloze_word=cloze_word)
+        used_fallback = True
 
     parts: list[str] = []
     if previous_cloze is not None:
@@ -223,7 +257,15 @@ def render_reminder_message(
             "Try to guess the missing word; the answer will show up next time."
         )
 
-    return RenderedReminderMessage(message="\n\n".join(parts), content=content)
+    message = "\n\n".join(parts)
+    logger.info(
+        "Rendering reminder message complete after %.2fs: word=%r message_chars=%s used_fallback=%s",
+        time.perf_counter() - started,
+        word.word,
+        len(message),
+        used_fallback,
+    )
+    return RenderedReminderMessage(message=message, content=content)
 
 
 def build_reminder_message(

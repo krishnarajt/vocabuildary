@@ -120,6 +120,12 @@ LLM_GATEWAY_CHAT_PATH: str = os.getenv(
     "LLM_GATEWAY_CHAT_PATH",
     "/api/chat",
 )
+LLM_GATEWAY_TIMEOUT_SECONDS: float = float(os.getenv("LLM_GATEWAY_TIMEOUT_SECONDS", "180"))
+LLM_GATEWAY_CONNECT_TIMEOUT_SECONDS: float = float(
+    os.getenv("LLM_GATEWAY_CONNECT_TIMEOUT_SECONDS", "30")
+)
+LLM_GATEWAY_WRITE_TIMEOUT_SECONDS: float = float(os.getenv("LLM_GATEWAY_WRITE_TIMEOUT_SECONDS", "30"))
+LLM_GATEWAY_POOL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_GATEWAY_POOL_TIMEOUT_SECONDS", "30"))
 
 # ===== Import job =====
 # Path to the CSV file consumed by the startup importer / jobs/import_words.py.

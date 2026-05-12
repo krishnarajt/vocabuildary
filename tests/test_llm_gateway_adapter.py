@@ -89,6 +89,9 @@ class LLMGatewayAdapterTests(unittest.TestCase):
             call["headers"],
             {"Content-Type": "application/json", "X-API-Key": "gw-test-key"},
         )
+        self.assertIsInstance(call["timeout"], httpx.Timeout)
+        self.assertEqual(call["timeout"].read, 180.0)
+        self.assertEqual(call["timeout"].connect, 30.0)
         self.assertEqual(
             call["json"],
             {
@@ -102,6 +105,26 @@ class LLMGatewayAdapterTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_chat_supports_custom_timeout(self):
+        calls = []
+        response = FakeResponse({"content": '{"paragraph":"ok","history":"ok","etymology":"ok"}'})
+
+        def client_factory(timeout):
+            return FakeClient(timeout, response, calls)
+
+        adapter = LLMGatewayAdapter(
+            base_url="https://gateway.test",
+            api_key="gw-test-key",
+            default_model="gemini-flash-latest",
+            chat_path="/api/chat",
+            timeout=240,
+        )
+
+        with patch("app.adapters.llm_gateway.httpx.Client", side_effect=client_factory):
+            adapter.chat(messages=[{"role": "user", "content": "Word: ephemeral"}])
+
+        self.assertEqual(calls[0]["timeout"].read, 240.0)
 
     def test_chat_requires_gateway_api_key(self):
         adapter = LLMGatewayAdapter(
