@@ -15,7 +15,7 @@ metadata:
     app: vocabuildary
     component: service
 spec:
-  replicas: 1
+  replicas: 0
   minReadySeconds: 60
   progressDeadlineSeconds: 180
   strategy:
